@@ -674,24 +674,24 @@ export default function TeacherAttendanceScan() {
        </div>}
 
      {/* Instructions card */}
-     <div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mt-6 rounded-lg">
-       <div className="flex">
-         <div className="flex-shrink-0">
-           <AlertCircle className="h-5 w-5 text-yellow-500" />
-         </div>
-         <div className="ml-3">
-           <h3 className="text-sm font-medium text-yellow-800"><span className="editable-text">Petunjuk Absensi</span></h3>
-           <div className="mt-2 text-sm text-yellow-700">
-             <ul className="list-disc pl-5 space-y-1">
-               <li><span className="editable-text">Pastikan foto selfie Anda terlihat jelas</span></li>
-               <li><span className="editable-text">Pastikan pencahayaan cukup terang</span></li>
-               <li><span className="editable-text">Pastikan Anda berada di area sekolah</span></li>
-               <li><span className="editable-text">Aktifkan GPS pada perangkat Anda</span></li>
-             </ul>
-           </div>
-         </div>
-       </div>
-     </div>
-   </div>
- );
+    {/*<div className="bg-yellow-50 border-l-4 border-yellow-500 p-4 mt-6 rounded-lg">
+      <div className="flex">
+        <div className="flex-shrink-0">
+          <AlertCircle className="h-5 w-5 text-yellow-500" />
+        </div>
+        <div className="ml-3">
+          <h3 className="text-sm font-medium text-yellow-800"><span className="editable-text">Petunjuk Absensi</span></h3>
+          <div className="mt-2 text-sm text-yellow-700">
+            <ul className="list-disc pl-5 space-y-1">
+              <li><span className="editable-text">Pastikan foto selfie Anda terlihat jelas</span></li>
+              <li><span className="editable-text">Pastikan pencahayaan cukup terang</span></li>
+              <li><span className="editable-text">Pastikan Anda berada di area sekolah</span></li>
+              <li><span className="editable-text">Aktifkan GPS pada perangkat Anda</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>*/}
+  </div>;
+  
 }
