@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user has a specific role
+    function hasRole(role) {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+    
+    // Check if the user is an admin
+    function isAdmin() {
+      return hasRole('admin');
+    }
+    
+    // Check if the user is a teacher
+    function isTeacher() {
+      return hasRole('teacher') || isAdmin();
+    }
+    
+    // Check if user belongs to the school
+    function belongsToSchool(schoolId) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.schoolId == schoolId;
+    }
+    
+    // Schools collection
+    match /schools/{schoolId} {
+      // School document can be read by anyone in the school, but modified only by admins
+      allow read: if belongsToSchool(schoolId);
+      allow write: if isAdmin() && belongsToSchool(schoolId);
+      
+      // Students subcollection
+      match /students/{studentId} {
+        allow read: if belongsToSchool(schoolId);
+        allow create, update, delete: if isTeacher() && belongsToSchool(schoolId);
+      }
+      
+      // Classes subcollection
+      match /classes/{classId} {
+        allow read: if belongsToSchool(schoolId);
+        allow create, update, delete: if isTeacher() && belongsToSchool(schoolId);
+      }
+      
+      // Attendance subcollection
+      match /attendance/{attendanceId} {
+        allow read: if belongsToSchool(schoolId);
+        allow create: if isAuthenticated() && belongsToSchool(schoolId);
+        allow update, delete: if isTeacher() && belongsToSchool(schoolId);
+      }
+    }
+    
+    // Users collection - each user can read and update only their own profile
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isAdmin());
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isAuthenticated() && request.auth.uid == userId;
+      // Only admins can delete users
+      allow delete: if isAdmin();
+    }
+  }
+}
