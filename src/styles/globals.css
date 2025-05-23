@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: #FFFFFF;
+    --foreground: #09090B;
+    --card: #FFFFFF;
+    --card-foreground: #09090B;
+    --popover: #FFFFFF;
+    --popover-foreground: #09090B;
+    --primary: #0A2463;
+    --primary-foreground: #FFFFFF;
+    --secondary: #FF7D00;
+    --secondary-foreground: #FFFFFF;
+    --muted: #F4F4F5;
+    --muted-foreground: #71717A;
+    --accent: #F4F8FF;
+    --accent-foreground: #0A2463;
+    --destructive: #EF4444;
+    --destructive-foreground: #FAFAFA;
+    --border: #E4E4E7;
+    --input: #E4E4E7;
+    --ring: #0A2463;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer components {
+  .container-custom {
+    @apply container mx-auto px-3 sm:px-4 md:px-6 lg:px-8;
+  }
+  
+  .btn-primary {
+    @apply bg-[#0A2463] hover:bg-[#0A2463] hover:bg-opacity-90 text-white px-4 sm:px-6 py-2 sm:py-2.5 rounded-lg font-medium transition-all;
+  }
+  
+  .btn-secondary {
+    @apply bg-[#FF7D00] hover:bg-[#FF7D00] hover:bg-opacity-90 text-white px-4 sm:px-6 py-2 sm:py-2.5 rounded-lg font-medium transition-all;
+  }
+  
+  .section-title {
+    @apply text-xl sm:text-2xl md:text-3xl font-bold mb-3 sm:mb-4;
+  }
+  
+  .card {
+    @apply bg-white rounded-xl shadow-md p-4 sm:p-6 hover:shadow-lg transition-shadow;
+  }
+}
+
+nextjs-portal {
+  display: none;
+}
