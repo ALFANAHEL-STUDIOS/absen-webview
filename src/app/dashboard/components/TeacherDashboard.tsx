@@ -159,7 +159,7 @@ export default function TeacherDashboard({
                 </div>
               </Link>
               
-              <Link href="/dashboard/absensi-guru/profile-user" className="bg-[#4361EE] rounded-xl shadow-sm p-4 sm:p-5 hover:shadow-md transition-all" data-unique-id="9d56790f-5ed5-419b-8809-f415e7fb832f" data-file-name="app/dashboard/components/TeacherDashboard.tsx">
+              <Link href="/dashboard/profile-user" className="bg-[#4361EE] rounded-xl shadow-sm p-4 sm:p-5 hover:shadow-md transition-all" data-unique-id="9d56790f-5ed5-419b-8809-f415e7fb832f" data-file-name="app/dashboard/components/TeacherDashboard.tsx">
                 <div className="flex flex-col items-center justify-center" data-unique-id="d67e1a99-fb89-4289-b835-96eebddd4a47" data-file-name="app/dashboard/components/TeacherDashboard.tsx">
                   <div className="bg-[#4361EE] bg-opacity-20 p-2 sm:p-3 rounded-full mb-2 sm:mb-3" data-unique-id="5359fecb-882f-44c5-8873-a5452e2dcf29" data-file-name="app/dashboard/components/TeacherDashboard.tsx">
                     <Users className="h-5 w-5 sm:h-6 sm:w-6 text-white" />
