@@ -1,588 +1,1140 @@
 "use client";
-
 import React, { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { useAuth } from "@/context/AuthContext";
-import { FileText, Calendar, Download, FileSpreadsheet, ArrowLeft, Loader2, Filter, Search, User, ChevronDown } from "lucide-react";
+import { ArrowLeft, Calendar, Download, FileSpreadsheet, FileText, Loader2, ChevronLeft, ChevronRight, AlertCircle } from "lucide-react";
 import Link from "next/link";
-import { toast } from "react-hot-toast";
-import { format, subDays } from "date-fns";
+import { format, subMonths, addMonths, parseISO } from "date-fns";
 import { id } from "date-fns/locale";
-import { motion } from "framer-motion";
-import { jsPDF } from "jspdf";
-import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
+import { toast } from "react-hot-toast";
+import { useAuth } from "@/context/AuthContext";
 import { db } from "@/lib/firebase";
+import { doc, getDoc, collection, query, where, getDocs, orderBy } from "firebase/firestore";
+import { jsPDF } from "jspdf";
+import { motion } from "framer-motion";
 export default function TeacherAttendanceReports() {
-  const {
-    user,
-    userRole,
-    schoolId
-  } = useAuth();
-  const router = useRouter();
-  const [loading, setLoading] = useState(true);
-  const [exporting, setExporting] = useState(false);
-  const [attendanceData, setAttendanceData] = useState<any[]>([]);
-  const [filteredData, setFilteredData] = useState<any[]>([]);
-  const [teachers, setTeachers] = useState<any[]>([]);
-  const [dateRange, setDateRange] = useState({
-    start: format(subDays(new Date(), 30), "yyyy-MM-dd"),
-    end: format(new Date(), "yyyy-MM-dd")
-  });
-  const [filters, setFilters] = useState({
-    teacherId: "all",
-    type: "all",
-    status: "all",
-    searchQuery: ""
-  });
+ const {
+   schoolId,
+   user
+ } = useAuth();
+ const [currentDate, setCurrentDate] = useState(new Date());
+ const [isDownloading, setIsDownloading] = useState(false);
+ const [loading, setLoading] = useState(true);
+ const [teachers, setTeachers] = useState<any[]>([]);
+ const [filteredTeachers, setFilteredTeachers] = useState<any[]>([]);
+ const [userData, setUserData] = useState<any>(null);
+ const [attendanceData, setAttendanceData] = useState<any[]>([]);
+ const [error, setError] = useState<string | null>(null);
+ const [dateRange, setDateRange] = useState({
+   start: format(new Date(new Date().setDate(1)), "yyyy-MM-dd"),
+   end: format(new Date(new Date().setMonth(new Date().getMonth() + 1, 0)), "yyyy-MM-dd")
+ });
+ const [teacherCount, setTeacherCount] = useState(0);
 
-  // Load data
-  useEffect(() => {
-    // Check authorization
-    if (userRole !== 'admin') {
-      toast.error("Anda tidak memiliki akses ke halaman ini");
-      router.push('/dashboard');
-      return;
-    }
-    const loadData = async () => {
-      if (!schoolId) return;
-      try {
-        setLoading(true);
+ // Helper function to calculate percentages for attendance data
+ const calculatePercentage = (data: any[], type: string): string => {
+   if (!data || data.length === 0) return "0.0";
+   const item = data.find(item => {
+     if (type === 'present') return item.type === 'Hadir';
+     if (type === 'late') return item.type === 'Terlambat';
+     if (type === 'permitted') return item.type === 'Izin';
+     if (type === 'absent') return item.type === 'Alpha';
+     return false;
+   });
+   return item ? item.value : "0.0";
+ };
 
-        // Load teachers
-        const teachersRef = collection(db, "users");
-        const teachersQuery = query(teachersRef, where("schoolId", "==", schoolId), where("role", "in", ["teacher", "staff"]));
-        const teachersSnapshot = await getDocs(teachersQuery);
-        const teachersList: any[] = [];
-        teachersSnapshot.forEach(doc => {
-          const data = doc.data();
-          teachersList.push({
-            id: doc.id,
-            name: data.name || "",
-            role: data.role || "teacher"
-          });
-        });
-        setTeachers(teachersList);
+ const [schoolInfo, setSchoolInfo] = useState({
+   name: "NAMA SEKOLAH",
+   address: "Alamat",
+   npsn: "NPSN",
+   principalName: "",
+   principalNip: ""
+ });
+ // Format current date for display
+ const formattedMonth = format(currentDate, "MMMM yyyy", {
+   locale: id
+ });
 
-        // Load attendance data
-        await fetchAttendanceData();
-      } catch (error) {
-        console.error("Error loading data:", error);
-        toast.error("Gagal memuat data");
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadData();
-  }, [schoolId, userRole, router]);
+ const formattedYear = format(currentDate, "yyyy");
 
-  // Fetch attendance data based on date range
-  const fetchAttendanceData = async () => {
-    if (!schoolId) return;
-    try {
-      setLoading(true);
-      const attendanceRef = collection(db, "teacherAttendance");
-      const attendanceQuery = query(attendanceRef, where("schoolId", "==", schoolId), where("date", ">=", dateRange.start), where("date", "<=", dateRange.end), orderBy("date", "desc"), orderBy("time", "desc"));
-      const snapshot = await getDocs(attendanceQuery);
-      const attendanceList: any[] = [];
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        attendanceList.push({
-          id: doc.id,
-          ...data,
-          // Convert Firestore timestamp to JS Date if needed
-          timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : new Date()
-        });
-      });
-      setAttendanceData(attendanceList);
-      setFilteredData(attendanceList);
-    } catch (error) {
-      console.error("Error fetching attendance data:", error);
-      toast.error("Gagal mengambil data kehadiran");
-    } finally {
-      setLoading(false);
-    }
-  };
+ // Fetch school, teachers and attendance data
+ useEffect(() => {
+   const fetchData = async () => {
+     if (!schoolId) return;
+     try {
+       setLoading(true);
+       setError(null);
+       // Fetch school info
+       const schoolDoc = await getDoc(doc(db, "schools", schoolId));
+       if (schoolDoc.exists()) {
+         const data = schoolDoc.data();
+         setSchoolInfo({
+           name: data.name || "NAMA SEKOLAH",
+           address: data.address || "Alamat",
+           npsn: data.npsn || "NPSN",
+           principalName: data.principalName || "",
+           principalNip: data.principalNip || ""
+         });
+       }
+       // Fetch user data for administrator signature
+       if (user) {
+         const userDoc = await getDoc(doc(db, "users", user.uid));
+         if (userDoc.exists()) {
+           setUserData(userDoc.data());
+         }
+       }
+       // Count total teachers in the school
+       const usersRef = collection(db, "users");
+       const teachersQuery = query(usersRef, where("schoolId", "==", schoolId), where("role", "in", ["teacher", "staff"]));
+       const teachersSnapshot = await getDocs(teachersQuery);
+       setTeacherCount(teachersSnapshot.size);
+       // Fetch teachers with attendance data
+       await fetchAttendanceData();
+     } catch (error) {
+       console.error("Error fetching data:", error);
+       setError("Gagal mengambil data dari database. Silakan coba lagi nanti.");
+       toast.error("Gagal mengambil data dari database");
+     } finally {
+       setLoading(false);
+     }
+   };
+   fetchData();
+ }, [schoolId, user]);
+ // Fetch attendance data when month changes
+ useEffect(() => {
+   if (schoolId) {
+     fetchAttendanceData();
+   }
+ }, [currentDate, schoolId]);
+ // Set all teachers to filtered teachers
+ useEffect(() => {
+   setFilteredTeachers(teachers);
+ }, [teachers]);
+ // Function to fetch attendance data
+ const fetchAttendanceData = async () => {
+   if (!schoolId) return;
+   try {
+     setLoading(true);
+     setError(null);
+     // Get start and end date for the month
+     const year = currentDate.getFullYear();
+     const month = currentDate.getMonth() + 1;
+     const startDate = `${year}-${month.toString().padStart(2, '0')}-01`;
+     // Calculate the last day of the month
+     const lastDay = new Date(year, month, 0).getDate();
+     const endDate = `${year}-${month.toString().padStart(2, '0')}-${lastDay}`;
+     // Get all teachers
+     const usersRef = collection(db, "users");
+     const teachersQuery = query(usersRef, where("schoolId", "==", schoolId), where("role", "in", ["teacher", "staff"]), orderBy("name", "asc"));
+     const teachersSnapshot = await getDocs(teachersQuery);
+     if (teachersSnapshot.empty) {
+       setTeachers([]);
+       setFilteredTeachers([]);
+       setAttendanceData([{
+         type: 'Hadir',
+         value: "0.0",
+         color: 'bg-blue-100 text-blue-800',
+         count: 0
+       }, {
+         type: 'Terlambat',
+         value: "0.0",
+         color: 'bg-amber-100 text-amber-800',
+         count: 0
+       }, {
+         type: 'Izin',
+         value: "0.0",
+         color: 'bg-green-100 text-green-800',
+         count: 0
+       }, {
+         type: 'Alpha',
+         value: "0.0",
+         color: 'bg-red-100 text-red-800',
+         count: 0
+       }]);
+       return;
+     }
 
-  // Apply filters
-  useEffect(() => {
-    let filtered = [...attendanceData];
+     const teachersList: any[] = [];
+     teachersSnapshot.forEach(doc => {
+       teachersList.push({
+         id: doc.id,
+         ...doc.data(),
+         // Initialize attendance counters
+         hadir: 0,
+         terlambat: 0,
+         izin: 0,
+         alpha: 0,
+         total: 0
+       });
+     });
+     // If we have teachers, get their attendance for the selected month
+     if (teachersList.length > 0) {
+       const attendanceRef = collection(db, "teacherAttendance");
+       const attendanceQuery = query(attendanceRef, where("schoolId", "==", schoolId), where("date", ">=", startDate), where("date", "<=", endDate));
+       const attendanceSnapshot = await getDocs(attendanceQuery);
+       // Process attendance records
+       attendanceSnapshot.forEach(doc => {
+         const data = doc.data();
+         const teacherId = data.teacherId;
+         const status = data.status;
+         const type = data.type; // 'in' or 'out'
+         // Find the teacher and update their attendance counts
+         const teacherIndex = teachersList.findIndex(t => t.id === teacherId);
+         if (teacherIndex !== -1) {
+           // Only count check-ins, not check-outs
+           if (type === 'in') {
+             if (status === 'present') {
+               teachersList[teacherIndex].hadir++;
+             } else if (status === 'late') {
+               teachersList[teacherIndex].terlambat++;
+             } else if (status === 'permitted') {
+               teachersList[teacherIndex].izin++;
+             } else if (status === 'absent') {
+               teachersList[teacherIndex].alpha++;
+             }
+             teachersList[teacherIndex].total++;
+           }
+         }
+       });
+     }
+     // Sort teachers by name
+     teachersList.sort((a, b) => a.name.localeCompare(b.name));
+     setTeachers(teachersList);
+     setFilteredTeachers(teachersList);
+     // Calculate overall percentages
+     let totalHadir = 0;
+     let totalTerlambat = 0;
+     let totalIzin = 0;
+     let totalAlpha = 0;
+     let totalAttendance = 0;
+     teachersList.forEach(teacher => {
+       totalHadir += teacher.hadir || 0;
+       totalTerlambat += teacher.terlambat || 0;
+       totalIzin += teacher.izin || 0;
+       totalAlpha += teacher.alpha || 0;
+       totalAttendance += teacher.total || 0;
+     });
+     // Prevent division by zero
+     if (totalAttendance === 0) totalAttendance = 1;
+     // Calculate percentages with one decimal place
+     const hadirPercentage = (totalHadir / totalAttendance * 100).toFixed(1);
+     const terlambatPercentage = (totalTerlambat / totalAttendance * 100).toFixed(1);
+     const izinPercentage = (totalIzin / totalAttendance * 100).toFixed(1);
+     const alphaPercentage = (totalAlpha / totalAttendance * 100).toFixed(1);
 
-    // Apply teacher filter
-    if (filters.teacherId !== "all") {
-      filtered = filtered.filter(item => item.teacherId === filters.teacherId);
-    }
+     setAttendanceData([{
+       type: 'Hadir',
+       value: hadirPercentage,
+       color: 'bg-blue-100 text-blue-800',
+       count: totalHadir
+     }, {
+       type: 'Terlambat',
+       value: terlambatPercentage,
+       color: 'bg-amber-100 text-amber-800',
+       count: totalTerlambat
+     }, {
+       type: 'Izin',
+       value: izinPercentage,
+       color: 'bg-green-100 text-green-800',
+       count: totalIzin
+     }, {
+       type: 'Alpha',
+       value: alphaPercentage,
+       color: 'bg-red-100 text-red-800',
+       count: totalAlpha
+     }]);
+   } catch (error) {
+     console.error("Error fetching attendance data:", error);
+     setError("Gagal mengambil data kehadiran. Silakan coba lagi nanti.");
+     toast.error("Gagal mengambil data kehadiran");
+     // Set default values on error
+     setAttendanceData([{
+       type: 'Hadir',
+       value: "0.0",
+       color: 'bg-blue-100 text-blue-800',
+       count: 0
+     }, {
+       type: 'Terlambat',
+       value: "0.0",
+       color: 'bg-amber-100 text-amber-800',
+       count: 0
+     }, {
+       type: 'Izin',
+       value: "0.0",
+       color: 'bg-green-100 text-green-800',
+       count: 0
+     }, {
+       type: 'Alpha',
+       value: "0.0",
+       color: 'bg-red-100 text-red-800',
+       count: 0
+     }]);
+   } finally {
+     setLoading(false);
+   }
+ };
 
-    // Apply type filter (in/out)
-    if (filters.type !== "all") {
-      filtered = filtered.filter(item => item.type === filters.type);
-    }
+ const handlePrevMonth = () => {
+   setCurrentDate(subMonths(currentDate, 1));
+ };
 
-    // Apply status filter
-    if (filters.status !== "all") {
-      filtered = filtered.filter(item => item.status === filters.status);
-    }
+ const handleNextMonth = () => {
+   setCurrentDate(addMonths(currentDate, 1));
+ };
 
-    // Apply search filter
-    if (filters.searchQuery) {
-      const query = filters.searchQuery.toLowerCase();
-      filtered = filtered.filter(item => item.teacherName.toLowerCase().includes(query) || item.date.includes(query) || item.time.includes(query));
-    }
-    setFilteredData(filtered);
-  }, [attendanceData, filters]);
+ const handleDownloadPDF = async () => {
+   setIsDownloading(true);
+   try {
+     const pdfDoc = new jsPDF({
+       orientation: "portrait",
+       unit: "mm",
+       format: "a4"
+     });
 
-  // Handle date change
-  const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const {
-      name,
-      value
-    } = e.target;
-    setDateRange(prev => ({
-      ...prev,
-      [name]: value
-    }));
-  };
+     const pageWidth = pdfDoc.internal.pageSize.getWidth();
+     const pageHeight = pdfDoc.internal.pageSize.getHeight();
+     const margin = 15;
 
-  // Apply date filter
-  const applyDateFilter = () => {
-    fetchAttendanceData();
-  };
+     // Add header with school information
+     pdfDoc.setFontSize(16);
+     pdfDoc.setFont("helvetica", "bold");
+     pdfDoc.text(schoolInfo.name.toUpperCase(), pageWidth / 2, margin, {
+       align: "center"
+     });
 
-  // Handle filter changes
-  const handleFilterChange = (e: React.ChangeEvent<HTMLSelectElement | HTMLInputElement>) => {
-    const {
-      name,
-      value
-    } = e.target;
-    setFilters(prev => ({
-      ...prev,
-      [name]: value
-    }));
-  };
+     pdfDoc.setFontSize(12);
+     pdfDoc.setFont("helvetica", "normal");
+     pdfDoc.text(schoolInfo.address, pageWidth / 2, margin + 7, {
+       align: "center"
+     });
 
-  // Export to PDF
-  const exportToPDF = async () => {
-    try {
-      setExporting(true);
-      const doc = new jsPDF({
-        orientation: "landscape",
-        unit: "mm",
-        format: "a4"
-      });
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const margin = 15;
+     pdfDoc.text(`NPSN: ${schoolInfo.npsn}`, pageWidth / 2, margin + 14, {
+       align: "center"
+     });
 
-      // Add title
-      doc.setFontSize(16);
-      doc.setFont("helvetica", "bold");
-      doc.text("LAPORAN ABSENSI GURU & TENAGA KEPENDIDIKAN", pageWidth / 2, margin, {
-        align: "center"
-      });
+     // Add horizontal line
+     pdfDoc.setLineWidth(0.5);
+     pdfDoc.line(margin, margin + 20, pageWidth - margin, margin + 20);
 
-      // Add date range
-      doc.setFontSize(12);
-      doc.setFont("helvetica", "normal");
-      const startDate = format(new Date(dateRange.start), "d MMMM yyyy", {
-        locale: id
-      });
-      const endDate = format(new Date(dateRange.end), "d MMMM yyyy", {
-        locale: id
-      });
-      doc.text(`Periode: ${startDate} - ${endDate}`, pageWidth / 2, margin + 8, {
-        align: "center"
-      });
+     // Add title
+     pdfDoc.setFontSize(12);
+     pdfDoc.setFont("helvetica", "normal");
+     pdfDoc.text("REKAPITULASI LAPORAN ABSENSI GURU DAN TENAGA KEPENDIDIKAN", pageWidth / 2, margin + 30, {
+       align: "center"
+     });
 
-      // Add current date
-      const currentDate = format(new Date(), "d MMMM yyyy", {
-        locale: id
-      });
-      doc.text(`Dicetak pada: ${currentDate}`, pageWidth - margin, margin, {
-        align: "right"
-      });
+     pdfDoc.text(`BULAN ${formattedMonth.toUpperCase()}`, pageWidth / 2, margin + 36, {
+       align: "center"
+     });
+     // Main attendance table
+     let yPos = margin + 43;
 
-      // Add table headers
-      const headers = ["No", "Nama", "Tanggal", "Waktu", "Jenis", "Status"];
-      const colWidths = [15, 60, 35, 30, 30, 30];
-      let yPos = margin + 20;
+     // Table headers
+     const headers = ["NO.", "NAMA GURU", "", "JABATAN", "HADIR", "TERLAMBAT", "IZIN", "ALPHA", "TOTAL"];
+     const colWidths = [12, 54, 0, 20, 17, 25, 15, 17, 20];
 
-      // Draw header row with light blue background
-      doc.setFillColor(200, 220, 240);
-      doc.rect(margin, yPos, pageWidth - margin * 2, 10, "F");
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(10);
-      let xPos = margin;
-      headers.forEach((header, i) => {
-        doc.text(header, xPos + colWidths[i] / 2, yPos + 6, {
-          align: "center"
-        });
-        xPos += colWidths[i];
-      });
-      yPos += 10;
+     // Draw table header - Light blue background
+     pdfDoc.setFillColor(173, 216, 230);
+     pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 8, "F");
+     pdfDoc.setDrawColor(0);
+     pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 8, "S"); // Border
 
-      // Draw table rows
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
-      filteredData.forEach((record, index) => {
-        // Add new page if needed
-        if (yPos > pageHeight - 30) {
-          doc.addPage();
-          yPos = margin;
+     let xPos = margin;
+     pdfDoc.setFontSize(9);
+     pdfDoc.setTextColor(0);
 
-          // Draw header on new page
-          doc.setFillColor(200, 220, 240);
-          doc.rect(margin, yPos, pageWidth - margin * 2, 10, "F");
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(10);
-          xPos = margin;
-          headers.forEach((header, i) => {
-            doc.text(header, xPos + colWidths[i] / 2, yPos + 6, {
-              align: "center"
-            });
-            xPos += colWidths[i];
-          });
-          yPos += 10;
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(9);
-        }
+     // Draw vertical lines and headers
+     headers.forEach((header, i) => {
+       if (i > 0) {
+         pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+       }
+       pdfDoc.text(header, xPos + colWidths[i] / 2, yPos + 5.5, {
+         align: "center"
+       });
+       xPos += colWidths[i];
+     });
 
-        // Alternate row colors
-        if (index % 2 === 0) {
-          doc.setFillColor(240, 240, 240);
-          doc.rect(margin, yPos, pageWidth - margin * 2, 8, "F");
-        }
+     yPos += 8;
 
-        // Draw row content
-        xPos = margin;
+     // Draw table rows
+     pdfDoc.setFontSize(10);
+     let totalHadir = 0,
+       totalTerlambat = 0,
+       totalIzin = 0,
+       totalAlpha = 0,
+       totalAll = 0;
 
-        // No
-        doc.text((index + 1).toString(), xPos + colWidths[0] / 2, yPos + 5, {
-          align: "center"
-        });
-        xPos += colWidths[0];
+     // Process each teacher's data
+     filteredTeachers.forEach((teacher, index) => {
+       // Row background (alternating)
+       if (index % 2 === 0) {
+         pdfDoc.setFillColor(240, 240, 240);
+         pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 7, "F");
+       }
 
-        // Name
-        doc.text(record.teacherName, xPos + 5, yPos + 5, {
-          align: "left"
-        });
-        xPos += colWidths[1];
+       // Draw row border
+       pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 7, "S");
 
-        // Date
-        const formattedDate = format(new Date(record.date), "d MMM yyyy", {
-          locale: id
-        });
-        doc.text(formattedDate, xPos + colWidths[2] / 2, yPos + 5, {
-          align: "center"
-        });
-        xPos += colWidths[2];
+       // Calculate totals
+       totalHadir += teacher.hadir || 0;
+       totalTerlambat += teacher.terlambat || 0;
+       totalIzin += teacher.izin || 0;
+       totalAlpha += teacher.alpha || 0;
+       const teacherTotal = (teacher.hadir || 0) + (teacher.terlambat || 0) + (teacher.izin || 0) + (teacher.alpha || 0);
+       totalAll += teacherTotal;
 
-        // Time
-        doc.text(record.time, xPos + colWidths[3] / 2, yPos + 5, {
-          align: "center"
-        });
-        xPos += colWidths[3];
+       // Draw cell content
+       xPos = margin;
 
-        // Type
-        const typeText = record.type === "in" ? "Masuk" : "Pulang";
-        doc.text(typeText, xPos + colWidths[4] / 2, yPos + 5, {
-          align: "center"
-        });
-        xPos += colWidths[4];
+       // Number
+       pdfDoc.text((index + 1).toString(), xPos + colWidths[0] / 2, yPos + 5, {
+         align: "center"
+       });
+       xPos += colWidths[0];
 
-        // Status
-        const statusText = record.status === "present" ? "Hadir" : record.status === "late" ? "Terlambat" : "Tidak Hadir";
-        doc.text(statusText, xPos + colWidths[5] / 2, yPos + 5, {
-          align: "center"
-        });
-        yPos += 8;
-      });
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
 
-      // Save the PDF
-      const fileName = `Laporan_Absensi_Guru_${format(new Date(), "yyyyMMdd")}.pdf`;
-      doc.save(fileName);
-      toast.success("Laporan PDF berhasil diunduh");
-    } catch (error) {
-      console.error("Error exporting to PDF:", error);
-      toast.error("Gagal mengunduh laporan PDF");
-    } finally {
-      setExporting(false);
-    }
-  };
+       // Name - truncate if too long
+       const displayName = teacher.name.length > 25 ? teacher.name.substring(0, 22) + "..." : teacher.name;
+       pdfDoc.text(displayName || "", xPos + 2, yPos + 5);
+       xPos += colWidths[1];
 
-  // Export to Excel
-  const exportToExcel = async () => {
-    try {
-      setExporting(true);
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       //pdfDoc.text(teacher.nik || "", xPos + colWidths[2] / 2, yPos + 5, {
+       // align: "center"
+       // });
+       xPos += colWidths[2];
 
-      // Dynamic import XLSX library
-      const XLSX = await import('xlsx');
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       const roleText = teacher.role === 'teacher' ? 'Guru' : 'Tendik';
+       pdfDoc.text(roleText, xPos + colWidths[3] / 2, yPos + 5, {
+         align: "center"
+       });
+       xPos += colWidths[3];
 
-      // Prepare data
-      const excelData = [["LAPORAN ABSENSI GURU & TENAGA KEPENDIDIKAN"], [`Periode: ${format(new Date(dateRange.start), "d MMMM yyyy", {
-        locale: id
-      })} - ${format(new Date(dateRange.end), "d MMMM yyyy", {
-        locale: id
-      })}`], [], ["No", "Nama", "Tanggal", "Waktu", "Jenis", "Status", "NIK"]];
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       pdfDoc.text((teacher.hadir || 0).toString(), xPos + colWidths[4] / 2, yPos + 5, {
+         align: "center"
+       });
+       xPos += colWidths[4];
 
-      // Add data rows
-      filteredData.forEach((record, index) => {
-        const formattedDate = format(new Date(record.date), "d MMM yyyy", {
-          locale: id
-        });
-        const typeText = record.type === "in" ? "Masuk" : "Pulang";
-        const statusText = record.status === "present" ? "Hadir" : record.status === "late" ? "Terlambat" : "Tidak Hadir";
-        excelData.push([index + 1, record.teacherName, formattedDate, record.time, typeText, statusText, record.teacherNik || "-"]);
-      });
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       pdfDoc.text((teacher.terlambat || 0).toString(), xPos + colWidths[5] / 2, yPos + 5, {
+         align: "center"
+       });
+       xPos += colWidths[5];
 
-      // Create worksheet
-      const ws = XLSX.utils.aoa_to_sheet(excelData);
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       pdfDoc.text((teacher.izin || 0).toString(), xPos + colWidths[6] / 2, yPos + 5, {
+         align: "center"
+       });
+       xPos += colWidths[6];
 
-      // Set column widths
-      ws['!cols'] = [{
-        wch: 5
-      },
-      // No
-      {
-        wch: 30
-      },
-      // Nama
-      {
-        wch: 15
-      },
-      // Tanggal
-      {
-        wch: 10
-      },
-      // Waktu
-      {
-        wch: 10
-      },
-      // Jenis
-      {
-        wch: 15
-      },
-      // Status
-      {
-        wch: 20
-      } // NIK
-      ];
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       pdfDoc.text((teacher.alpha || 0).toString(), xPos + colWidths[7] / 2, yPos + 5, {
+         align: "center"
+       });
+       xPos += colWidths[7];
 
-      // Create workbook
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Absensi Guru");
+       // Draw vertical line
+       pdfDoc.line(xPos, yPos, xPos, yPos + 7);
+       pdfDoc.text(teacherTotal.toString(), xPos + colWidths[8] / 2, yPos + 5, {
+         align: "center"
+       });
 
-      // Save file
-      const fileName = `Laporan_Absensi_Guru_${format(new Date(), "yyyyMMdd")}.xlsx`;
-      XLSX.writeFile(wb, fileName);
-      toast.success("Laporan Excel berhasil diunduh");
-    } catch (error) {
-      console.error("Error exporting to Excel:", error);
-      toast.error("Gagal mengunduh laporan Excel");
-    } finally {
-      setExporting(false);
-    }
-  };
+       yPos += 7;
 
-  // Function to format date for display
-  const formatDate = (dateStr: string) => {
-    return format(new Date(dateStr), "d MMMM yyyy", {
-      locale: id
-    });
-  };
-  return <div className="pb-20 md:pb-6" data-unique-id="e74d58fa-0cd1-46b3-bf3e-457349c4df7a" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-      <div className="flex items-center mb-6" data-unique-id="6d3111d3-0f06-4e6e-bc4d-1238bc4bd1b3" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-        <div className="flex items-center" data-unique-id="1e2c73da-b6b5-47ae-8166-b6a0b0d1e894" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-          <Link href="/dashboard/absensi-guru" className="p-2 mr-2 hover:bg-gray-100 rounded-full" data-unique-id="59a4b174-ce57-4bff-9ce3-9e3b733bde60" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <ArrowLeft size={20} />
-          </Link>
-          <h1 className="text-2xl font-bold text-gray-800" data-unique-id="e1050595-a499-4a64-a01a-4dce280654c4" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="f536d5b1-68a3-4884-ba10-b570dbde524c" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Laporan Absensi Guru</span></h1>
+       // Add a new page if needed
+       if (yPos > pageHeight - margin - 100 && index < filteredTeachers.length - 1) {
+         pdfDoc.addPage();
+
+         // Add header to new page
+         pdfDoc.setFontSize(12);
+         pdfDoc.setFont("helvetica", "bold");
+         pdfDoc.text(schoolInfo.name.toUpperCase(), pageWidth / 2, margin + 6, {
+           align: "center"
+         });
+
+         pdfDoc.setFontSize(12);
+         pdfDoc.setFont("helvetica", "normal");
+         pdfDoc.text(schoolInfo.address, pageWidth / 2, margin + 12, {
+           align: "center"
+         });
+
+         pdfDoc.text(`NPSN : ${schoolInfo.npsn}`, pageWidth / 2, margin + 18, {
+           align: "center"
+         });
+
+         // Add horizontal line
+         pdfDoc.setLineWidth(0.5);
+         pdfDoc.line(margin, margin + 22, pageWidth - margin, margin + 22);
+
+         yPos = margin + 30;
+
+         // Add table header
+         pdfDoc.setFillColor(173, 216, 230);
+         pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 8, "F");
+         pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 8, "S");
+
+         xPos = margin;
+         pdfDoc.setFontSize(10);
+
+         // Draw headers again
+         headers.forEach((header, i) => {
+           if (i > 0) {
+             pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+           }
+           pdfDoc.text(header, xPos + colWidths[i] / 2, yPos + 5.5, {
+             align: "center"
+           });
+           xPos += colWidths[i];
+         });
+
+         yPos += 8;
+         pdfDoc.setFontSize(10);
+       }
+     });
+     // Add total row
+     pdfDoc.setFillColor(200, 200, 200);
+     pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 8, "F");
+     pdfDoc.rect(margin, yPos, pageWidth - margin * 2, 8, "S");
+
+     xPos = margin;
+     pdfDoc.setFontSize(10);
+     pdfDoc.setFont("helvetica", "normal");
+
+     // Total text
+     pdfDoc.text("TOTAL", xPos + colWidths[0] / 2 + colWidths[1] / 2, yPos + 5, {
+       align: "center"
+     });
+
+     xPos += colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3];
+
+     // Draw vertical line
+     pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+     pdfDoc.text(totalHadir.toString(), xPos + colWidths[4] / 2, yPos + 5, {
+       align: "center"
+     });
+
+     xPos += colWidths[4];
+
+     // Draw vertical line
+     pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+     pdfDoc.text(totalTerlambat.toString(), xPos + colWidths[5] / 2, yPos + 5, {
+       align: "center"
+     });
+
+     xPos += colWidths[5];
+
+     // Draw vertical line
+     pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+     pdfDoc.text(totalIzin.toString(), xPos + colWidths[6] / 2, yPos + 5, {
+       align: "center"
+     });
+
+     xPos += colWidths[6];
+
+     // Draw vertical line
+     pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+     pdfDoc.text(totalAlpha.toString(), xPos + colWidths[7] / 2, yPos + 5, {
+       align: "center"
+     });
+
+     xPos += colWidths[7];
+
+     // Draw vertical line
+     pdfDoc.line(xPos, yPos, xPos, yPos + 8);
+     pdfDoc.text(totalAll.toString(), xPos + colWidths[8] / 2, yPos + 5, {
+       align: "center"
+     });
+
+     yPos += 18;
+
+     // Get top teachers by category
+     const getTopTeachersByCategory = () => {
+       const sortedByHadir = [...teachers].sort((a, b) => (b.hadir || 0) - (a.hadir || 0)).slice(0, 3);
+       const sortedByTerlambat = [...teachers].sort((a, b) => (b.terlambat || 0) - (a.terlambat || 0)).slice(0, 3);
+       const sortedByIzin = [...teachers].sort((a, b) => (b.izin || 0) - (a.izin || 0)).slice(0, 3);
+       const sortedByAlpha = [...teachers].sort((a, b) => (b.alpha || 0) - (a.alpha || 0)).slice(0, 3);
+
+       return {
+         hadir: sortedByHadir,
+         terlambat: sortedByTerlambat,
+         izin: sortedByIzin,
+         alpha: sortedByAlpha
+       };
+     };
+
+     const topTeachersByCategory = getTopTeachersByCategory();
+
+     // Add sections for teachers with most attendance in each category
+     const addTeacherCategorySection = (title, teachers, startY) => {
+       pdfDoc.setFontSize(10);
+       pdfDoc.setFont("helvetica", "normal");
+       pdfDoc.text(title + " Terbanyak :", margin, startY);
+
+       const tableHeaders = ["No.", "Nama", "NIK", "Jabatan", "Jumlah"];
+       const colWidths = [10, 55, 38, 23, 27];
+       let yPosition = startY + 5;
+
+       // Draw header row
+       pdfDoc.setFillColor(173, 216, 230);
+       pdfDoc.rect(margin, yPosition, colWidths.reduce((a, b) => a + b, 0), 8, "F");
+       pdfDoc.rect(margin, yPosition, colWidths.reduce((a, b) => a + b, 0), 8, "S");
+
+       let xPosition = margin;
+
+       // Draw column headers
+       tableHeaders.forEach((header, i) => {
+         if (i > 0) {
+           pdfDoc.line(xPosition, yPosition, xPosition, yPosition + 8);
+         }
+         pdfDoc.text(header, xPosition + colWidths[i] / 2, yPosition + 5, {
+           align: "center"
+         });
+         xPosition += colWidths[i];
+       });
+
+       yPosition += 8;
+
+       // Draw rows
+       pdfDoc.setFont("helvetica", "normal");
+       teachers.forEach((teacher, index) => {
+         // Draw row border
+         pdfDoc.rect(margin, yPosition, colWidths.reduce((a, b) => a + b, 0), 8, "S");
+         xPosition = margin;
+
+         // Number
+         pdfDoc.text((index + 1).toString(), xPosition + colWidths[0] / 2, yPosition + 5, {
+           align: "center"
+         });
+         xPosition += colWidths[0];
+         pdfDoc.line(xPosition, yPosition, xPosition, yPosition + 8);
+
+         // Name - truncate if too long
+         const displayName = teacher.name.length > 25 ? teacher.name.substring(0, 22) + "..." : teacher.name;
+         pdfDoc.text(displayName || "", xPosition + 2, yPosition + 5);
+         xPosition += colWidths[1];
+         pdfDoc.line(xPosition, yPosition, xPosition, yPosition + 8);
+
+         // NIP/NIK
+         pdfDoc.text(teacher.nik || "", xPosition + colWidths[2] / 2, yPosition + 5, {
+           align: "center"
+         });
+         xPosition += colWidths[2];
+         pdfDoc.line(xPosition, yPosition, xPosition, yPosition + 8);
+
+         // Role
+         const roleText = teacher.role === 'teacher' ? 'Guru' : 'Tendik';
+         pdfDoc.text(roleText, xPosition + colWidths[3] / 2, yPosition + 5, {
+           align: "center"
+         });
+         xPosition += colWidths[3];
+         pdfDoc.line(xPosition, yPosition, xPosition, yPosition + 8);
+
+         // Count - varies depending on section type
+         let count = 0;
+         let categoryDetail = '';
+         switch (title) {
+           case "Guru/Tendik dengan Hadir":
+             count = teacher.hadir || 0;
+             break;
+           case "Guru/Tendik dengan Terlambat":
+             count = teacher.terlambat || 0;
+             break;
+           case "Guru/Tendik dengan Izin":
+             count = teacher.izin || 0;
+             // Include izin type if available
+             if (teacher.izinDetails?.type) {
+               categoryDetail = `(${teacher.izinDetails.type})`;
+             }
+             break;
+           case "Guru/Tendik dengan Alpha":
+             count = teacher.alpha || 0;
+             // Include alpha type if available
+             if (teacher.alphaDetails?.type) {
+               categoryDetail = `(${teacher.alphaDetails.type})`;
+             }
+             break;
+         }
+         // Add the count and category detail if available
+         const displayText = categoryDetail ? `${count} ${categoryDetail}` : count.toString();
+         pdfDoc.text(displayText, xPosition + colWidths[4] / 2, yPosition + 5, {
+           align: "center"
+         });
+         pdfDoc.text(count.toString(), xPosition + colWidths[4] / 2, yPosition + 5, {
+           align: "center"
+         });
+         yPosition += 8;
+       });
+
+       return yPosition;
+     };
+
+     // Check if we need a new page for the teacher sections
+     if (yPos + 120 > pageHeight) {
+       pdfDoc.addPage();
+       yPos = margin + 20;
+     }
+
+     // Teachers with most "Hadir"
+     yPos = addTeacherCategorySection("Guru/Tendik dengan Hadir", topTeachersByCategory.hadir, yPos) + 8;
+
+     // Teachers with most "Terlambat"
+     yPos = addTeacherCategorySection("Guru/Tendik dengan Terlambat", topTeachersByCategory.terlambat, yPos) + 8;
+
+     // Check if we need a new page for the remaining sections
+     if (yPos + 80 > pageHeight) {
+       pdfDoc.addPage();
+       yPos = margin + 20;
+     }
+
+     // Teachers with most "Izin"
+     yPos = addTeacherCategorySection("Guru/Tendik dengan Izin", topTeachersByCategory.izin, yPos) + 8;
+
+     // Teachers with most "Alpha"
+     yPos = addTeacherCategorySection("Guru/Tendik dengan Alpha", topTeachersByCategory.alpha, yPos) + 12;
+
+     // Add signature section
+     yPos += 5;
+
+     // Signature layout
+     const signatureWidth = (pageWidth - margin * 2) / 2;
+     pdfDoc.setFontSize(10);
+     pdfDoc.setFont("helvetica", "normal");
+
+     pdfDoc.text("Mengetahui", signatureWidth * 0.25 + margin, yPos, {
+       align: "center"
+     });
+
+     pdfDoc.text("Administrator Sekolah", signatureWidth * 1.75 + margin, yPos, {
+       align: "center"
+     });
+
+     yPos += 5;
+
+     pdfDoc.text("KEPALA SEKOLAH,", signatureWidth * 0.25 + margin, yPos, {
+       align: "center"
+     });
+
+     pdfDoc.text("Absensi Digital,", signatureWidth * 1.75 + margin, yPos, {
+       align: "center"
+     });
+
+     yPos += 20;
+
+     pdfDoc.text(schoolInfo.principalName || "Kepala Sekolah", signatureWidth * 0.25 + margin, yPos, {
+       align: "center"
+     });
+
+     pdfDoc.text(userData?.name || "Administrator", signatureWidth * 1.75 + margin, yPos, {
+       align: "center"
+     });
+
+     yPos += 5;
+
+     pdfDoc.text(`NIP. ${schoolInfo.principalNip || "................................"}`, signatureWidth * 0.25 + margin, yPos, {
+       align: "center"
+     });
+
+     pdfDoc.text("NIP. ....................................", signatureWidth * 1.75 + margin, yPos, {
+       align: "center"
+     });
+
+     // Save the PDF
+     const fileName = `Rekap_Kehadiran_Guru_${formattedMonth.replace(' ', '_')}.pdf`;
+     pdfDoc.save(fileName);
+     toast.success(`Laporan berhasil diunduh sebagai ${fileName}`);
+   } catch (error) {
+     console.error("Error generating PDF:", error);
+     toast.error("Gagal mengunduh laporan PDF");
+   } finally {
+     setIsDownloading(false);
+   }
+ };
+
+ const handleDownloadExcel = async () => {
+   setIsDownloading(true);
+   try {
+     // Dynamically import xlsx library
+     const XLSX = await import('xlsx');
+     // Format current month name properly
+     const monthName = format(currentDate, "MMMM yyyy", {
+       locale: id
+     }).toUpperCase();
+     // Create header data with school information
+     const headerData = [
+       [schoolInfo.name.toUpperCase()],
+       [schoolInfo.address],
+       [`NPSN: ${schoolInfo.npsn}`],
+       [""],
+       ["REKAPITULASI LAPORAN ABSENSI GURU DAN TENAGA KEPENDIDIKAN"],
+       [`BULAN ${monthName}`],
+       [`TOTAL GURU & TENDIK: ${teacherCount}`],
+       [""],
+       ["No.", "Nama Guru/Tendik", "NIK", "Jabatan", "Hadir", "Terlambat", "Izin", "Alpha", "Total"]
+     ];
+
+     // Calculate totals for summary
+     let totalHadir = 0;
+     let totalTerlambat = 0;
+     let totalIzin = 0;
+     let totalAlpha = 0;
+     let totalAll = 0;
+
+     // Add teacher data
+     filteredTeachers.forEach((teacher, index) => {
+       const teacherHadir = teacher.hadir || 0;
+       const teacherTerlambat = teacher.terlambat || 0;
+       const teacherIzin = teacher.izin || 0;
+       const teacherAlpha = teacher.alpha || 0;
+       const teacherTotal = teacherHadir + teacherTerlambat + teacherIzin + teacherAlpha;
+       const roleText = teacher.role === 'teacher' ? 'Guru' : 'Tendik';
+
+       // Add to totals
+       totalHadir += teacherHadir;
+       totalTerlambat += teacherTerlambat;
+       totalIzin += teacherIzin;
+       totalAlpha += teacherAlpha;
+       totalAll += teacherTotal;
+
+       headerData.push([
+         index + 1,
+         teacher.name || "nama guru/tendik",
+         teacher.nik || "nip/nik",
+         roleText,
+         teacherHadir,
+         teacherTerlambat,
+         teacherIzin,
+         teacherAlpha,
+         teacherTotal
+       ]);
+     });
+
+     // Add total row
+     headerData.push(["Total", "", "", "", totalHadir.toString(), totalTerlambat.toString(), totalIzin.toString(), totalAlpha.toString(), totalAll.toString()]);
+
+     // Add empty rows
+     headerData.push([]);
+     headerData.push([]);
+
+     // Get top teachers by category
+     const topTeachersByHadir = [...filteredTeachers].sort((a, b) => (b.hadir || 0) - (a.hadir || 0)).slice(0, 3);
+     const topTeachersByTerlambat = [...filteredTeachers].sort((a, b) => (b.terlambat || 0) - (a.terlambat || 0)).slice(0, 3);
+     const topTeachersByIzin = [...filteredTeachers].sort((a, b) => (b.izin || 0) - (a.izin || 0)).slice(0, 3);
+     const topTeachersByAlpha = [...filteredTeachers].sort((a, b) => (b.alpha || 0) - (a.alpha || 0)).slice(0, 3);
+
+     // Add "Guru/Tendik dengan Hadir Terbanyak" section
+     headerData.push(["Guru/Tendik dengan Hadir Terbanyak :"]);
+     headerData.push(["No.", "Nama", "NIP/NIK", "Jabatan", "Jumlah"]);
+     topTeachersByHadir.forEach((teacher, index) => {
+       headerData.push([
+         index + 1,
+         teacher.name || "nama",
+         teacher.nik || "nip/nik",
+         teacher.role === 'teacher' ? 'Guru' : 'Tendik',
+         teacher.hadir || 0
+       ]);
+     });
+
+     // Add empty row
+     headerData.push([]);
+
+     // Add "Guru/Tendik dengan Terlambat Terbanyak" section
+     headerData.push(["Guru/Tendik dengan Terlambat Terbanyak :"]);
+     headerData.push(["No.", "Nama", "NIP/NIK", "Jabatan", "Jumlah"]);
+     topTeachersByTerlambat.forEach((teacher, index) => {
+       headerData.push([
+         index + 1,
+         teacher.name || "nama",
+         teacher.nik || "nip/nik",
+         teacher.role === 'teacher' ? 'Guru' : 'Tendik',
+         teacher.terlambat || 0
+       ]);
+     });
+
+     // Add empty row
+     headerData.push([]);
+
+     // Add "Guru/Tendik dengan Izin Terbanyak" section
+     headerData.push(["Guru/Tendik dengan Izin Terbanyak :"]);
+     headerData.push(["No.", "Nama", "NIP/NIK", "Jabatan", "Jumlah"]);
+     topTeachersByIzin.forEach((teacher, index) => {
+       headerData.push([
+         index + 1,
+         teacher.name || "nama",
+         teacher.nik || "nip/nik",
+         teacher.role === 'teacher' ? 'Guru' : 'Tendik',
+         teacher.izin || 0
+       ]);
+     });
+
+     // Add empty row
+     headerData.push([]);
+
+     // Add "Guru/Tendik dengan Alpha Terbanyak" section
+     headerData.push(["Guru/Tendik dengan Alpha Terbanyak :"]);
+     headerData.push(["No.", "Nama", "NIP/NIK", "Jabatan", "Jumlah"]);
+     topTeachersByAlpha.forEach((teacher, index) => {
+       headerData.push([
+         index + 1,
+         teacher.name || "nama",
+         teacher.nik || "nip/nik",
+         teacher.role === 'teacher' ? 'Guru' : 'Tendik',
+         teacher.alpha || 0
+       ]);
+     });
+
+     // Add signature section
+     headerData.push([]);
+     headerData.push([]);
+     headerData.push([]);
+
+     // Add signature
+     const currentDate = format(new Date(), "d MMMM yyyy", {
+       locale: id
+     });
+
+     headerData.push([`${schoolInfo.address}, ${currentDate}`]);
+     headerData.push([]);
+     headerData.push(["", "Mengetahui", "", "", "", "", "", "Administrator Sekolah"]);
+     headerData.push(["", "KEPALA SEKOLAH,", "", "", "", "", "", "Nama Sekolah,"]);
+     headerData.push([]);
+     headerData.push([]);
+     headerData.push([]);
+     headerData.push(["", schoolInfo.principalName, "", "", "", "", "", userData?.name || "Administrator"]);
+     headerData.push(["", `NIP. ${schoolInfo.principalNip}`, "", "", "", "", "", "NIP. ..............................."]);
+
+     // Create workbook and add worksheet
+     const wb = XLSX.utils.book_new();
+     const ws = XLSX.utils.aoa_to_sheet(headerData);
+
+     // Set column widths
+     const colWidths = [
+       { wch: 6 },  // No.
+       { wch: 30 }, // Name
+       { wch: 15 }, // NIP/NIK
+       { wch: 15 }, // Jabatan
+       { wch: 8 },  // Hadir
+       { wch: 12 }, // Terlambat
+       { wch: 8 },  // Izin
+       { wch: 8 },  // Alpha
+       { wch: 8 }   // Total
+     ];
+
+     ws['!cols'] = colWidths;
+
+     // Add worksheet to workbook
+     XLSX.utils.book_append_sheet(wb, ws, "Rekap Kehadiran Guru");
+
+     // Generate filename with current date
+     const fileName = `Rekap_Kehadiran_Guru_${format(currentDate, "MMMM_yyyy", {
+       locale: id
+     })}_${format(new Date(), "ddMMyyyy")}.xlsx`;
+
+     XLSX.writeFile(wb, fileName);
+     toast.success(`Laporan berhasil diunduh sebagai ${fileName}`);
+   } catch (error) {
+     console.error("Error generating Excel:", error);
+     toast.error("Gagal mengunduh laporan Excel");
+   } finally {
+     setIsDownloading(false);
+   }
+ };
+
+ // Calculate attendance summary
+ const calculateSummary = () => {
+   if (!attendanceData || attendanceData.length === 0) {
+     return {
+       hadir: "0.0",
+       terlambat: "0.0",
+       izin: "0.0",
+       alpha: "0.0"
+     };
+   }
+
+   return {
+     hadir: calculatePercentage(attendanceData, 'present'),
+     terlambat: calculatePercentage(attendanceData, 'late'),
+     izin: calculatePercentage(attendanceData, 'permitted'),
+     alpha: calculatePercentage(attendanceData, 'absent')
+   };
+ };
+
+ const summary = calculateSummary();
+
+ return <div className="w-full max-w-6xl mx-auto px-3 sm:px-4 md:px-6">
+    <div className="flex items-center mb-6">
+      <Link href="/dashboard/absensi-guru" className="p-2 mr-2 hover:bg-gray-100 rounded-full">
+        <ArrowLeft size={20} />
+      </Link>
+      <h1 className="text-2xl font-bold text-gray-800 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600"><span className="editable-text">Rekap Kehadiran Guru dan Tendik</span></h1>
+    </div>
+    <div className="bg-white rounded-xl shadow-sm p-6 mb-6 border border-blue-100">
+      <div className="flex flex-col space-y-3 sm:space-y-0 sm:flex-row sm:items-center sm:justify-between mb-3 sm:mb-4 md:mb-6">
+        <motion.div className="flex items-center mb-4 md:mb-0" initial={{
+         opacity: 0,
+         y: 20
+       }} animate={{
+         opacity: 1,
+         y: 0
+       }} transition={{
+         duration: 0.4
+       }}>
+          <div className="bg-gradient-to-br from-blue-500 to-indigo-600 p-2 rounded-lg mr-3 shadow-md">
+            <Calendar className="h-6 w-6 text-white" />
+          </div>
+          <div>
+            <h2 className="text-xl font-semibold"><span className="editable-text">Bulan : </span>{format(currentDate, "MMMM yyyy", {
+               locale: id
+             })}</h2>
+            <p className="text-xs text-gray-500">{teacherCount}<span className="editable-text"> Guru & Tendik</span></p>
+          </div>
+        </motion.div>
+        <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
+          <button onClick={handlePrevMonth} className="p-2 rounded-full border border-gray-200 shadow-sm hover:bg-gray-50 transition-colors flex items-center justify-center">
+            <ChevronLeft size={20} className="text-blue-600" />
+          </button>
+          <button onClick={handleNextMonth} className="p-2 rounded-full border border-gray-200 shadow-sm hover:bg-gray-50 transition-colors flex items-center justify-center">
+            <ChevronRight size={20} className="text-blue-600" />
+          </button>
         </div>
       </div>
-      
-      {/* Filters */}
-      <div className="bg-white rounded-xl shadow-sm p-5 mb-6" data-unique-id="e0bf7360-3222-4839-b3f8-d04a09d40f11" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-        <h2 className="text-base font-semibold mb-4" data-unique-id="c1d183f5-6a6a-4d04-8234-aac3e04cc60b" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="22a4ba78-e9d2-4c14-8b57-591dfd0fbb90" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Filter Laporan</span></h2>
-        
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4" data-unique-id="c64ce97d-bf85-4226-b632-72635109138e" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-          {/* Date range */}
-          <div data-unique-id="e719c290-1bd8-448a-8ef6-6165ae5410a6" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <label htmlFor="start" className="block text-sm font-medium text-gray-700 mb-1" data-unique-id="5b2d637a-75b3-4f52-8982-054f415bd12b" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="4c95a344-6a7e-421a-a20b-95a6f0242fad" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Tanggal Mulai
-            </span></label>
-            <input type="date" id="start" name="start" value={dateRange.start} onChange={handleDateChange} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary" data-unique-id="55bec4e3-524a-4ee0-9849-24f60a2286f6" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" />
-          </div>
-          
-          <div data-unique-id="34c071a8-548c-4043-a863-cd4ef93bb5a8" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <label htmlFor="end" className="block text-sm font-medium text-gray-700 mb-1" data-unique-id="fceb23dd-db0d-4492-8bb0-036e7bdddfdf" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="4eac1463-5eed-4f52-9b81-9949badc7a97" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Tanggal Akhir
-            </span></label>
-            <input type="date" id="end" name="end" value={dateRange.end} onChange={handleDateChange} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary" data-unique-id="9b0421df-9652-4757-995a-eacf9c092b4d" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" />
-          </div>
-          
-          {/* Teacher filter */}
-          <div data-unique-id="908bf6ca-d581-4320-ae95-6a55cae08420" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <label htmlFor="teacherId" className="block text-sm font-medium text-gray-700 mb-1" data-unique-id="86f10bff-d680-4ba4-afbf-a4764f513e69" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="6aecae03-bb40-4cdb-b9f5-8b19430ca956" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Guru / Tendik
-            </span></label>
-            <div className="relative" data-unique-id="7ed45868-80ee-4afe-a35a-9a83ad40bc59" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <User className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-              <select id="teacherId" name="teacherId" value={filters.teacherId} onChange={handleFilterChange} className="w-full pl-9 px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary appearance-none bg-white" data-unique-id="c47c9f94-ef1c-43d6-909b-607893e33624" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                <option value="all" data-unique-id="bbf3fec3-bebc-4a45-a13f-381771a37658" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="476d8fd6-993e-4f6a-8adb-e759e07f1755" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Semua</span></option>
-                {teachers.map(teacher => <option key={teacher.id} value={teacher.id} data-is-mapped="true" data-unique-id="bff32cd0-8235-4dff-80f6-042e4bcc411b" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                    {teacher.name}
-                  </option>)}
-              </select>
-              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+      {/* Attendance Summary Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        {attendanceData.map((item, index) => <motion.div key={item.type} className={`${item.color.split(" ")[0]} p-4 rounded-xl shadow-sm border border-${item.color.split(" ")[0].replace('bg-', '')}-200`} initial={{
+         opacity: 0,
+         y: 20
+       }} animate={{
+         opacity: 1,
+         y: 0
+       }} transition={{
+         duration: 0.3,
+         delay: index * 0.1
+       }}>
+            <h3 className="text-sm font-medium text-gray-700 mb-1">{item.type}</h3>
+            <div className="flex justify-between items-end">
+              <p className="text-3xl font-bold text-blue-700">
+                {loading ? <span className="animate-pulse bg-gray-200 block h-8 w-16 rounded"></span> : `${item.value}%`}
+              </p>
+              <span className="text-sm text-gray-500">{item.count}<span className="editable-text"> kejadian</span></span>
             </div>
-          </div>
-          
-          {/* Type filter */}
-          <div data-unique-id="d1b7d649-85ff-4c54-9b51-f036fdb444da" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <label htmlFor="type" className="block text-sm font-medium text-gray-700 mb-1" data-unique-id="878e8fe5-0af6-4f7b-95ec-1d929b61951a" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="84475c9b-d6db-4be4-a5b6-4203d5e08191" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Jenis Absensi
-            </span></label>
-            <div className="relative" data-unique-id="48e1310e-c4cd-4815-b813-03dbdfb0eb67" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-              <select id="type" name="type" value={filters.type} onChange={handleFilterChange} className="w-full pl-9 px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary appearance-none bg-white" data-unique-id="76ef6e7e-8a9d-402e-b8a6-c9802d52a0a0" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                <option value="all" data-unique-id="7802d748-cd13-48e9-958c-61e3cffb90ed" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="fe8671ff-cb1b-4a00-a1a2-88345e4a8762" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Semua</span></option>
-                <option value="in" data-unique-id="6ae3a82f-ae3a-4e12-9143-477c9b752009" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="ce5b2fb9-95b8-4b2f-94d2-4c7cb04aeed4" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Masuk</span></option>
-                <option value="out" data-unique-id="1061fca9-5b7e-4a20-8453-69d3e4a1b91c" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="adde7d00-a221-4db8-847d-1a163dfdcc12" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Pulang</span></option>
-              </select>
-              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-            </div>
-          </div>
-        </div>
-        
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4" data-unique-id="207287b9-66da-423f-81d7-a08b27c750f3" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-          {/* Status filter */}
-          <div data-unique-id="9b17a06f-1443-421a-b0b6-99bc5d510cb9" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <label htmlFor="status" className="block text-sm font-medium text-gray-700 mb-1" data-unique-id="4f2f4669-c7fe-4383-bd8c-8111a0fb1588" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="ec277810-5d7b-42aa-8d81-cd9e20e9ce26" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Status
-            </span></label>
-            <div className="relative" data-unique-id="080b27f1-62ee-42b5-8076-a242d89b3178" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-              <select id="status" name="status" value={filters.status} onChange={handleFilterChange} className="w-full pl-9 px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary appearance-none bg-white" data-unique-id="685bc902-3e84-4249-b279-af856ec6cfe8" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                <option value="all" data-unique-id="258c40f3-e908-49b9-85fb-c19b7d458cef" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="e0e27adb-a516-4c7c-bbc1-e4c8c4594fd8" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Semua</span></option>
-                <option value="present" data-unique-id="4a234fab-cb37-453b-8e2c-72c88f7c46a9" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="5ff35fd1-628e-40e4-b896-88e7ae2e2a2b" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Hadir</span></option>
-                <option value="late" data-unique-id="a5a7b4e8-3f0c-43b1-912f-7cc779e39559" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="621bc04b-83c2-4cc8-a39f-c045f5cf4e43" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Terlambat</span></option>
-              </select>
-              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-            </div>
-          </div>
-          
-          {/* Search */}
-          <div className="md:col-span-2" data-unique-id="6615fe34-7938-4039-9e62-36db79f346bb" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <label htmlFor="searchQuery" className="block text-sm font-medium text-gray-700 mb-1" data-unique-id="c8bf6c78-484e-4ac3-a316-83b9dbda56ac" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="00809d4a-6688-475f-ac93-33aaaa72be5c" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Cari
-            </span></label>
-            <div className="relative" data-unique-id="e967250b-e0d1-4c96-8a34-bfe7f66f2472" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-              <input type="text" id="searchQuery" name="searchQuery" value={filters.searchQuery} onChange={handleFilterChange} placeholder="Cari nama, tanggal..." className="w-full pl-9 px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary" data-unique-id="b41c7fc2-f65c-46ca-a667-2e5bc2db7cc3" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" />
-            </div>
-          </div>
-          
-          {/* Apply date filter button */}
-          <div className="flex items-end" data-unique-id="dc004d11-e4cc-4ad3-a1a7-9d581e089192" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <button onClick={applyDateFilter} className="w-full px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary hover:bg-opacity-90 transition-colors flex items-center justify-center gap-2" data-unique-id="4f24cd2f-ddfa-43a3-8160-f6cf00c28771" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <Calendar size={16} data-unique-id="09d6fdf5-5f89-404f-b8ec-d03f13ebdcc8" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" /><span className="editable-text" data-unique-id="319abcdf-3a29-43b2-b49b-43673e35f289" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              Terapkan Tanggal
-            </span></button>
-          </div>
-        </div>
+          </motion.div>)}
       </div>
-      
-      {/* Attendance Data */}
-      {loading ? <div className="flex justify-center items-center h-64" data-unique-id="d1fa5ea7-7697-417c-a2c1-defe52e49032" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-          <Loader2 className="h-12 w-12 text-primary animate-spin" />
-        </div> : filteredData.length > 0 ? <div className="bg-white rounded-xl shadow-sm overflow-hidden" data-unique-id="96868eb2-4084-416b-bfb2-e68394160068" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-          <div className="p-5 border-b border-gray-200 flex justify-between items-center" data-unique-id="11c39dd5-cb7e-4704-b34b-d9f1a2e6a2fd" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <h2 className="text-lg font-semibold" data-unique-id="065ecd97-79bd-4e11-9f1a-56f4834ef3c9" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="3a9a18ef-0a40-4a15-8e93-ade13890be20" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Data Absensi</span></h2>
-            <p className="text-sm text-gray-500" data-unique-id="8a2496ad-4193-4be2-af33-da5d6c6297e1" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true"><span className="editable-text" data-unique-id="d212dc98-a9dd-4dcd-ab57-d27fbf6c62e8" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Total: </span>{filteredData.length}<span className="editable-text" data-unique-id="3d9fa513-9905-492d-b7de-023d2f82ccb5" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"> data</span></p>
-          </div>
-          
-          <div className="overflow-x-auto" data-unique-id="3475220c-fd0b-4c7b-a4af-1ff3dcae9387" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <table className="min-w-full divide-y divide-gray-200" data-unique-id="183753fc-236d-4ccf-83d5-c31c536d2520" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <thead className="bg-gray-50" data-unique-id="8c389eff-2b4d-4268-860c-357092bef083" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                <tr data-unique-id="b097375f-1821-4079-ba56-a4d202489c04" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" data-unique-id="d7cac579-66b5-4e3f-a8df-ae67390542fe" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="5d325266-c3b4-43e7-8011-8c1c7dcfe3de" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    Nama
-                  </span></th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" data-unique-id="1ce60142-5de0-448a-bb11-5f5d39eaa1b3" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="25b06c0e-09f6-431b-b8fe-1548e7273d4c" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    NIK
-                  </span></th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" data-unique-id="b9634a81-da8e-48f1-ad43-2c3ff74cf89a" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="6836680f-ece7-4dfb-af00-721521233a90" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    Tanggal
-                  </span></th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" data-unique-id="dd357562-d87f-4be7-9461-105a4464da96" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="06bc3842-1e13-4eac-965b-1a2295476c30" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    Waktu
-                  </span></th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" data-unique-id="60001338-2ee6-4996-8d5b-8d92598d1b19" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="fbbd9fce-bb09-48e2-8f84-57039a73e94b" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    Jenis
-                  </span></th>
-                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" data-unique-id="d03aa0a0-6f44-43e6-aea8-dff05a21fe75" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="79d20eff-c005-4d22-a574-f1306b550362" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    Status
-                  </span></th>
+      {/* School Information and Table */}
+      <div className="bg-gradient-to-b from-white to-blue-50 border border-blue-200 rounded-lg overflow-hidden shadow-md">
+         <div className="text-center p-4">
+           <h2 className="text-gray-700 sm:text-xl font-bold uppercase">{schoolInfo.name}</h2>
+           <p className="text-gray-700 font-medium">{schoolInfo.address}</p>
+           <p className="text-gray-700 font-medium"><span className="editable-text">NPSN : </span>{schoolInfo.npsn}</p>
+         </div>
+         <hr className="border-t border-blue-200 mt-1 mb-3" />
+         <div className="text-center mb-4">
+           <h3 className="text-gray-700 uppercase font-bold"><span className="editable-text">REKAP LAPORAN KEHADIRAN GURU DAN TENDIK</span></h3>
+           <p className="text-gray-700"><span className="editable-text">BULAN </span>{format(currentDate, "MMMM yyyy", {
+             locale: id
+           }).toUpperCase()}</p>
+         </div>
+        {error && <div className="p-4 mb-4 text-center">
+            <div className="flex items-center justify-center gap-2 text-red-600 mb-2">
+              <AlertCircle size={20} />
+              <p className="font-medium">{error}</p>
+            </div>
+          </div>}
+        {loading ? <div className="flex justify-center items-center h-64">
+            <Loader2 className="h-12 w-12 text-primary animate-spin" />
+          </div> : <div className="overflow-x-auto">
+            <table className="min-w-full border">
+              <thead>
+                <tr className="bg-gradient-to-r from-blue-100 to-indigo-100">
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Nama</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">NIK</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Jabatan</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Hadir</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Terlambat</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Izin</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Alpha</span></th>
+                  <th className="border px-2 py-2 text-center text-sm font-bold text-gray-700"><span className="editable-text">Total</span></th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200" data-unique-id="4ea993bf-d57e-4c46-8498-f9bae074810a" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                {filteredData.map(record => <tr key={record.id} className="hover:bg-gray-50" data-is-mapped="true" data-unique-id="8fff8923-2bdb-41cb-a810-19e35f50c8f1" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                    <td className="px-6 py-4 whitespace-nowrap" data-is-mapped="true" data-unique-id="26adac37-ed53-43c5-a9ca-dda8a06a3232" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                      <div className="font-medium text-gray-900" data-is-mapped="true" data-unique-id="dd49d7f8-0720-4ae7-bbd1-a9b5a71719ee" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">{record.teacherName}</div>
+              <tbody>
+                {filteredTeachers.length > 0 ? filteredTeachers.map((teacher, index) => <motion.tr key={teacher.id} className={index % 2 === 0 ? "bg-white" : "bg-blue-50"} initial={{
+               opacity: 0,
+               y: 10
+             }} animate={{
+               opacity: 1,
+               y: 0
+             }} transition={{
+               duration: 0.2,
+               delay: index * 0.03
+             }}>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm font-medium">{teacher.name}</td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center">{teacher.nik || "-"}</td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center">
+                        {teacher.role === 'teacher' ? 'Guru' : 'Tendik'}
+                      </td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center">{teacher.hadir || 0}</td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center">{teacher.terlambat || 0}</td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center">{teacher.izin || 0}</td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center">{teacher.alpha || 0}</td>
+                      <td className="text-gray-600 border px-2 py-1.5 text-xs sm:text-sm text-center font-medium">
+                        {(teacher.hadir || 0) + (teacher.terlambat || 0) + (teacher.izin || 0) + (teacher.alpha || 0)}
+                      </td>
+                    </motion.tr>) : <tr>
+                    <td colSpan={8} className="border px-4 py-8 text-center text-gray-500">
+                      <div className="flex flex-col items-center justify-center gap-2">
+                        <AlertCircle size={24} className="text-blue-400" />
+                        <span className="editable-text">Tidak ada data kehadiran yang ditemukan</span>
+                      </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" data-is-mapped="true" data-unique-id="8e9231b1-d775-4bd8-85a8-292f30b59883" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                      {record.teacherNik || "-"}
+                  </tr>}
+                {/* Total row */}
+                {filteredTeachers.length > 0 && <tr className="bg-gradient-to-r from-blue-200 to-indigo-200 font-medium">
+                    <td colSpan={3} className="border px-2 py-2.5 font-bold text-sm text-center"><span className="editable-text">TOTAL</span></td>
+                    <td className="border px-2 py-2.5 text-center font-bold text-sm">
+                      {filteredTeachers.reduce((sum, teacher) => sum + (teacher.hadir || 0), 0)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" data-is-mapped="true" data-unique-id="d1ffe3da-207c-4769-ad02-5f56e5ee62c9" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                      {formatDate(record.date)}
+                    <td className="border px-2 py-2.5 text-center font-bold text-sm">
+                      {filteredTeachers.reduce((sum, teacher) => sum + (teacher.terlambat || 0), 0)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" data-is-mapped="true" data-unique-id="a1e627e2-0d66-4b4c-8a26-ecf2855343a7" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                      {record.time}
+                    <td className="border px-2 py-2.5 text-center font-bold text-sm">
+                      {filteredTeachers.reduce((sum, teacher) => sum + (teacher.izin || 0), 0)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap" data-is-mapped="true" data-unique-id="04b8e78c-bc55-418c-a11c-2c444542d812" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                      <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${record.type === "in" ? "bg-blue-100 text-blue-800" : "bg-green-100 text-green-800"}`} data-is-mapped="true" data-unique-id="b304eb07-738d-49d2-8349-66e185c15ec2" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                        {record.type === "in" ? "Masuk" : "Pulang"}
-                      </span>
+                    <td className="border px-2 py-2.5 text-center font-bold text-sm">
+                      {filteredTeachers.reduce((sum, teacher) => sum + (teacher.alpha || 0), 0)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap" data-is-mapped="true" data-unique-id="54609deb-40ac-4447-8e65-8ce227d12268" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-                      <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${record.status === "present" ? "bg-green-100 text-green-800" : record.status === "late" ? "bg-orange-100 text-orange-800" : "bg-red-100 text-red-800"}`} data-is-mapped="true" data-unique-id="8e2fc6ad-b668-4666-a355-f7d9871171a1" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-                        {record.status === "present" ? "Hadir" : record.status === "late" ? "Terlambat" : "Tidak Hadir"}
-                      </span>
+                    <td className="border px-2 py-2.5 text-center font-bold text-sm">
+                      {filteredTeachers.reduce((sum, teacher) => sum + ((teacher.hadir || 0) + (teacher.terlambat || 0) + (teacher.izin || 0) + (teacher.alpha || 0)), 0)}
                     </td>
-                  </tr>)}
+                  </tr>}
               </tbody>
             </table>
-          </div>
-          
-          {/* Download buttons - Moved below table */}
-          <div className="flex flex-col w-full gap-4 mt-6 p-4 border-t border-gray-200" data-unique-id="d02f5d19-8fb1-4765-a4db-167162231f67" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <button onClick={exportToPDF} disabled={exporting || filteredData.length === 0} className="w-full flex items-center justify-center gap-3 bg-red-600 text-white p-4 rounded-xl hover:bg-red-700 disabled:bg-gray-300 disabled:text-gray-500 transition-colors" data-unique-id="413ad4fc-0ab9-4e35-b66f-770355ae2fa7" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-              {exporting ? <Loader2 className="h-6 w-6 animate-spin" /> : <FileText className="h-6 w-6" />}
-              <span className="font-medium" data-unique-id="1f34561e-3f0d-4d84-822c-4d582055366d" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="b19ca0f3-042a-422a-b8da-23dff00c6209" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Download Laporan PDF</span></span>
-            </button>
-            
-            <button onClick={exportToExcel} disabled={exporting || filteredData.length === 0} className="w-full flex items-center justify-center gap-3 bg-green-600 text-white p-4 rounded-xl hover:bg-green-700 disabled:bg-gray-300 disabled:text-gray-500 transition-colors" data-unique-id="2f9c7076-1e3c-48c1-b2a5-27820226cf34" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-              {exporting ? <Loader2 className="h-6 w-6 animate-spin" /> : <FileSpreadsheet className="h-6 w-6" />}
-              <span className="font-medium" data-unique-id="036fb80d-e943-4817-ab07-251f7764420d" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="4d2b9248-c677-4f7f-9fab-44dc60d6b945" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Download Laporan Excel</span></span>
-            </button>
-          </div>
-        </div> : <div className="bg-white rounded-xl shadow-sm p-10 text-center" data-unique-id="fa25594f-5148-49d1-b79c-1b4173fc9751" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-          <FileText className="h-16 w-16 text-gray-300 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold mb-2" data-unique-id="a98c4e78-8bc4-4dbc-bdae-3a52a67e3650" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="4f289092-01c5-4e96-ad70-640c953ddec8" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Tidak Ada Data</span></h2>
-          <p className="text-gray-500 mb-8" data-unique-id="c93856ad-2cce-4e56-9c5b-9880a5254338" data-file-name="app/dashboard/absensi-guru/reports/page.tsx" data-dynamic-text="true">
-            {dateRange.start !== format(subDays(new Date(), 30), "yyyy-MM-dd") || dateRange.end !== format(new Date(), "yyyy-MM-dd") || Object.values(filters).some(value => value !== "all") ? "Tidak ada data yang sesuai dengan filter yang dipilih" : "Belum ada data absensi guru yang tersedia"}
-          </p>
-          
-          {/* Download buttons - Also shown when no data, but disabled */}
-          <div className="flex flex-col w-full gap-4 mt-6 border-t border-gray-200 pt-6" data-unique-id="4b587d1f-9efa-4344-9d97-0cb1ec0a019e" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-            <button onClick={exportToPDF} disabled={true} className="w-full flex items-center justify-center gap-3 bg-gray-300 text-gray-500 p-4 rounded-xl cursor-not-allowed transition-colors" data-unique-id="236d27a7-8ede-4b67-9f4b-8648cf4bb8bf" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <FileText className="h-6 w-6" />
-              <span className="font-medium" data-unique-id="26ee574a-05b9-4151-ac4c-0e60905cb336" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="c8839b70-9840-47fc-b210-acbd58cb6d51" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Download Laporan PDF</span></span>
-            </button>
-            
-            <button onClick={exportToExcel} disabled={true} className="w-full flex items-center justify-center gap-3 bg-gray-300 text-gray-500 p-4 rounded-xl cursor-not-allowed transition-colors" data-unique-id="5044b72e-a199-439a-a299-ec5904a4cfec" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">
-              <FileSpreadsheet className="h-6 w-6" />
-              <span className="font-medium" data-unique-id="db5d9c74-2c94-4db6-9d03-3fa2ba328680" data-file-name="app/dashboard/absensi-guru/reports/page.tsx"><span className="editable-text" data-unique-id="9f265f89-098f-4780-b2a1-53abb143b0a1" data-file-name="app/dashboard/absensi-guru/reports/page.tsx">Download Laporan Excel</span></span>
-            </button>
-          </div>
-        </div>}
-    </div>;
+          </div>}
+      </div>
+    </div>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-20 md:mb-6">
+      <motion.button onClick={handleDownloadPDF} disabled={isDownloading || loading} className="flex items-center justify-center gap-3 bg-gradient-to-r from-red-500 to-red-600 text-white p-4 rounded-xl hover:from-red-600 hover:to-red-700 transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed" whileHover={{
+       scale: 1.02
+     }} whileTap={{
+       scale: 0.98
+     }}>
+        {isDownloading ? <Loader2 className="h-6 w-6 animate-spin" /> : <FileText className="h-6 w-6" />}
+        <span className="font-medium"><span className="editable-text">Download Laporan PDF</span></span>
+      </motion.button>
+      <motion.button onClick={handleDownloadExcel} disabled={isDownloading || loading} className="flex items-center justify-center gap-3 bg-gradient-to-r from-green-500 to-green-600 text-white p-4 rounded-xl hover:from-green-600 hover:to-green-700 transition-all shadow-md disabled:opacity-50 disabled:cursor-not-allowed" whileHover={{
+       scale: 1.02
+     }} whileTap={{
+       scale: 0.98
+     }}>
+        {isDownloading ? <Loader2 className="h-6 w-6 animate-spin" /> : <FileSpreadsheet className="h-6 w-6" />}
+        <span className="font-medium"><span className="editable-text">Download Laporan Excel</span></span>
+      </motion.button>
+    </div>
+  </div>;
 }
