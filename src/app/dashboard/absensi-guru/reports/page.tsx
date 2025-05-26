@@ -1,680 +1,1149 @@
 "use client";
 import React, { useState, useEffect } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { ArrowLeft, Calendar, Download, FileSpreadsheet, FileText, Filter, Loader2, ChevronDown, ChevronUp } from "lucide-react";
+import { ArrowLeft, Calendar, Download, FileSpreadsheet, FileText, Loader2, PieChart, BarChart2, Users, Clock, X } from "lucide-react";
 import Link from "next/link";
-import { jsPDF } from "jspdf";
-import * as XLSX from "xlsx";
-import { format } from "date-fns";
+import { format, subMonths, subDays, addDays, parseISO } from "date-fns";
 import { id } from "date-fns/locale";
-import { toast } from "react-hot-toast";
 import { motion } from "framer-motion";
-interface TeacherAttendance {
- id: string;
- name: string;
- role: string; // "teacher" or "staff"
- position: string; // Jabatan
+import { toast } from "react-hot-toast";
+import {
+ BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+ PieChart as RechartsInternalPieChart, Pie, Cell
+} from "recharts";
+import { jsPDF } from "jspdf";
+import { db } from "@/lib/firebase";
+import { collection, query, where, getDocs, orderBy, Timestamp } from "firebase/firestore";
+// Define color constants
+const COLORS = {
+ present: "#4ade80", // green
+ late: "#facc15",    // yellow
+ permitted: "#60a5fa", // blue
+ absent: "#f87171",  // red
+};
+// Define the type for teacher status counts
+interface TeacherStatusCounts {
  present: number;
+ late: number;
  permitted: number;
  absent: number;
  total: number;
 }
-export default function TeacherAttendanceReports() {
- const { schoolId } = useAuth();
+// Define the type for attendance records
+interface AttendanceRecord {
+ id: string;
+ teacherId: string;
+ teacherName: string;
+ status: string;
+ date: string;
+ time: string;
+ timestamp: Timestamp;
+ type: string;
+}
+// Define the type for teacher status details
+interface TeacherStatusDetail {
+ id: string;
+ name: string;
+ status: string;
+ date: string;
+ time: string;
+}
+export default function TeacherAttendanceReportPage() {
+ const { schoolId, userRole } = useAuth();
  const [loading, setLoading] = useState(true);
- const [generating, setGenerating] = useState(false);
- const [attendanceData, setAttendanceData] = useState<TeacherAttendance[]>([]);
- const [filteredData, setFilteredData] = useState<TeacherAttendance[]>([]);
- const [filters, setFilters] = useState({
-   role: "all", // "all", "teacher", "staff"
-   month: format(new Date(), "yyyy-MM"),
-   sortBy: "name",
-   sortDirection: "asc" as "asc" | "desc"
+ const [isDownloading, setIsDownloading] = useState(false);
+ const [dateRange, setDateRange] = useState<'today' | 'week' | 'month' | 'custom'>('week');
+ const [startDate, setStartDate] = useState(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
+ const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+ const [statusCounts, setStatusCounts] = useState<TeacherStatusCounts>({
+   present: 0,
+   late: 0,
+   permitted: 0,
+   absent: 0,
+   total: 0
  });
+
+ // Store detailed lists of teachers with each status for the reports
+ const [permittedTeachers, setPermittedTeachers] = useState<TeacherStatusDetail[]>([]);
+ const [absentTeachers, setAbsentTeachers] = useState<TeacherStatusDetail[]>([]);
+ const [allAttendanceRecords, setAllAttendanceRecords] = useState<AttendanceRecord[]>([]);
+ const [dailyData, setDailyData] = useState<any[]>([]);
  const [schoolInfo, setSchoolInfo] = useState({
-   name: "Sekolah",
+   name: "Nama Sekolah",
    address: "Alamat Sekolah",
    npsn: "12345678",
    principalName: "Kepala Sekolah",
    principalNip: "123456789"
  });
- const roles = {
-   "all": "Semua",
-   "teacher": "Guru",
-   "staff": "Tendik"
- };
- // Fetch school information and teacher attendance data
+
+ // Use effect to fetch school information
  useEffect(() => {
-   const fetchData = async () => {
+   const fetchSchoolInfo = async () => {
      if (!schoolId) return;
-
-     setLoading(true);
      try {
-       // Fetch school info
        const { doc, getDoc } = await import('firebase/firestore');
-       const { db } = await import('@/lib/firebase');
        const schoolDoc = await getDoc(doc(db, "schools", schoolId));
-
        if (schoolDoc.exists()) {
          const data = schoolDoc.data();
          setSchoolInfo({
-           name: data.name || "Sekolah",
+           name: data.name || "Nama Sekolah",
            address: data.address || "Alamat Sekolah",
            npsn: data.npsn || "12345678",
            principalName: data.principalName || "Kepala Sekolah",
            principalNip: data.principalNip || "123456789"
          });
        }
+     } catch (error) {
+       console.error("Error fetching school info:", error);
+     }
+   };
 
-       // Fetch teacher data
-       const { collection, query, where, getDocs } = await import('firebase/firestore');
-       const teachersRef = collection(db, "users");
-       const teachersQuery = query(teachersRef, where("schoolId", "==", schoolId),
-                                 where("role", "in", ["teacher", "staff"]));
+   fetchSchoolInfo();
+ }, [schoolId]);
+
+ // Handle date range selection
+ useEffect(() => {
+   if (dateRange === 'today') {
+     const today = format(new Date(), 'yyyy-MM-dd');
+     setStartDate(today);
+     setEndDate(today);
+   } else if (dateRange === 'week') {
+     setStartDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
+     setEndDate(format(new Date(), 'yyyy-MM-dd'));
+   } else if (dateRange === 'month') {
+     setStartDate(format(subMonths(new Date(), 1), 'yyyy-MM-dd'));
+     setEndDate(format(new Date(), 'yyyy-MM-dd'));
+   }
+ }, [dateRange]);
+
+ // Fetch attendance data
+ useEffect(() => {
+   const fetchAttendanceData = async () => {
+     if (!schoolId) return;
+
+     setLoading(true);
+     try {
+       // Fetch teachers registered in the system
+       const usersRef = collection(db, "users");
+       const teachersQuery = query(
+         usersRef,
+         where("schoolId", "==", schoolId),
+         where("role", "in", ["teacher", "staff"])
+       );
        const teachersSnapshot = await getDocs(teachersQuery);
+       const teachersCount = teachersSnapshot.size;
 
-       // Get month from filters for attendance records
-       const year = parseInt(filters.month.split('-')[0]);
-       const month = parseInt(filters.month.split('-')[1]);
-       const startDate = new Date(year, month - 1, 1);
-       const endDate = new Date(year, month, 0);
-       const startDateStr = format(startDate, "yyyy-MM-dd");
-       const endDateStr = format(endDate, "yyyy-MM-dd");
-       // Fetch attendance records
-       const attendanceRef = collection(db, `schools/${schoolId}/teacherAttendance`);
-       const attendanceQuery = query(attendanceRef,
-                                 where("date", ">=", startDateStr),
-                                 where("date", "<=", endDateStr));
+       // Fetch attendance records in the date range
+       const attendanceRef = collection(db, "teacherAttendance");
+       const attendanceQuery = query(
+         attendanceRef,
+         where("schoolId", "==", schoolId),
+         where("date", ">=", startDate),
+         where("date", "<=", endDate),
+         orderBy("date", "asc")
+       );
+
        const attendanceSnapshot = await getDocs(attendanceQuery);
+       const attendanceRecords: AttendanceRecord[] = [];
+       attendanceSnapshot.forEach(doc => {
+         attendanceRecords.push({
+           id: doc.id,
+           ...doc.data()
+         } as AttendanceRecord);
+       });
+
+       setAllAttendanceRecords(attendanceRecords);
+
+       // Calculate counts for each status
+       const uniqueTeacherDays = new Map<string, Set<string>>();
+       const presentTeacherDays = new Map<string, Set<string>>();
+       const lateTeacherDays = new Map<string, Set<string>>();
+       const permittedTeacherDays = new Map<string, Set<string>>();
+
+       // Process all attendance records
+       const permittedList: TeacherStatusDetail[] = [];
+       const absentList: TeacherStatusDetail[] = [];
+
+       // Group attendance by day for charts
+       const dailyAttendance = new Map<string, {
+         present: number;
+         late: number;
+         permitted: number;
+         absent: number;
+         date: string;
+       }>();
+
+       // Process each day in the range to ensure all days are represented
+       let currentDate = parseISO(startDate);
+       const endDateObj = parseISO(endDate);
+
+       while (currentDate <= endDateObj) {
+         const dateStr = format(currentDate, 'yyyy-MM-dd');
+         dailyAttendance.set(dateStr, {
+           present: 0,
+           late: 0,
+           permitted: 0,
+           absent: 0,
+           date: dateStr
+         });
+         currentDate = addDays(currentDate, 1);
+       }
 
        // Process attendance records
-       const attendanceCounts: Record<string, { present: number, permitted: number, absent: number }> = {};
+       attendanceRecords.forEach(record => {
+         const teacherKey = `${record.teacherId}`;
+         const dateKey = record.date;
 
-       attendanceSnapshot.forEach(doc => {
-         const data = doc.data();
-         const teacherId = data.teacherId;
-
-         if (!attendanceCounts[teacherId]) {
-           attendanceCounts[teacherId] = { present: 0, permitted: 0, absent: 0 };
+         // Initialize sets if they don't exist
+         if (!uniqueTeacherDays.has(teacherKey)) {
+           uniqueTeacherDays.set(teacherKey, new Set());
+         }
+         if (!presentTeacherDays.has(teacherKey)) {
+           presentTeacherDays.set(teacherKey, new Set());
+         }
+         if (!lateTeacherDays.has(teacherKey)) {
+           lateTeacherDays.set(teacherKey, new Set());
+         }
+         if (!permittedTeacherDays.has(teacherKey)) {
+           permittedTeacherDays.set(teacherKey, new Set());
          }
 
-         if (data.status === 'present' || data.status === 'hadir') {
-           attendanceCounts[teacherId].present++;
-         } else if (data.status === 'permitted' || data.status === 'izin' || data.status === 'sick' || data.status === 'sakit') {
-           attendanceCounts[teacherId].permitted++;
-         } else if (data.status === 'absent' || data.status === 'alpha') {
-           attendanceCounts[teacherId].absent++;
+         uniqueTeacherDays.get(teacherKey)!.add(dateKey);
+
+         // Update daily attendance stats
+         if (dailyAttendance.has(dateKey)) {
+           const dailyStat = dailyAttendance.get(dateKey)!;
+
+           if (record.status === 'present') {
+             dailyStat.present++;
+             presentTeacherDays.get(teacherKey)!.add(dateKey);
+           } else if (record.status === 'late') {
+             dailyStat.late++;
+             lateTeacherDays.get(teacherKey)!.add(dateKey);
+           } else if (record.status === 'permitted' || record.status === 'izin') {
+             dailyStat.permitted++;
+             permittedTeacherDays.get(teacherKey)!.add(dateKey);
+
+             // Add to permitted list for reports
+             permittedList.push({
+               id: record.teacherId,
+               name: record.teacherName,
+               status: 'IZIN',
+               date: dateKey,
+               time: record.time || '-'
+             });
+           }
+
+           dailyAttendance.set(dateKey, dailyStat);
          }
        });
-       // Combine teacher data with attendance data
-       const teacherAttendanceData: TeacherAttendance[] = [];
 
-       teachersSnapshot.forEach(doc => {
-         const teacherData = doc.data();
-         const teacherId = doc.id;
-         const attendance = attendanceCounts[teacherId] || { present: 0, permitted: 0, absent: 0 };
-         const total = attendance.present + attendance.permitted + attendance.absent;
+       // Calculate absent teachers by finding teachers who don't have a record for each day
+       teachersSnapshot.forEach(teacherDoc => {
+         const teacherId = teacherDoc.id;
+         const teacherData = teacherDoc.data();
+         currentDate = parseISO(startDate);
 
-         teacherAttendanceData.push({
-           id: teacherId,
-           name: teacherData.name || "Unnamed",
-           role: teacherData.role || "teacher",
-           position: teacherData.position || (teacherData.role === "staff" ? "Tenaga Kependidikan" : "Guru"),
-           present: attendance.present,
-           permitted: attendance.permitted,
-           absent: attendance.absent,
-           total: total
-         });
+         while (currentDate <= endDateObj) {
+           const dateStr = format(currentDate, 'yyyy-MM-dd');
+           const teacherKey = teacherId;
+
+           // If the teacher has no record for this day, mark as absent
+           if (!uniqueTeacherDays.has(teacherKey) ||
+               !uniqueTeacherDays.get(teacherKey)!.has(dateStr)) {
+
+             // Update daily absent count
+             if (dailyAttendance.has(dateStr)) {
+               const dailyStat = dailyAttendance.get(dateStr)!;
+               dailyStat.absent++;
+               dailyAttendance.set(dateStr, dailyStat);
+             }
+
+             // Add to absent list for reports
+             absentList.push({
+               id: teacherId,
+               name: teacherData.name || 'Unknown Teacher',
+               status: 'ALPHA',
+               date: dateStr,
+               time: '-'
+             });
+           }
+
+           currentDate = addDays(currentDate, 1);
+         }
        });
-       setAttendanceData(teacherAttendanceData);
+
+       // Convert daily data for charts
+       const chartData = Array.from(dailyAttendance.values())
+         .sort((a, b) => a.date.localeCompare(b.date));
+
+       setDailyData(chartData);
+
+       // Count unique teachers with each status
+       let presentCount = 0;
+       let lateCount = 0;
+       let permittedCount = 0;
+
+       for (const [teacherId, dates] of presentTeacherDays) {
+         if (dates.size > 0) presentCount++;
+       }
+
+       for (const [teacherId, dates] of lateTeacherDays) {
+         if (dates.size > 0) lateCount++;
+       }
+
+       for (const [teacherId, dates] of permittedTeacherDays) {
+         if (dates.size > 0) permittedCount++;
+       }
+
+       // Calculate absent count (teachers with no attendance record)
+       const absentCount = teachersCount - presentCount - lateCount - permittedCount;
+
+       setStatusCounts({
+         present: presentCount,
+         late: lateCount,
+         permitted: permittedCount,
+         absent: absentCount,
+         total: teachersCount
+       });
+
+       // Set the lists of teachers with permitted and absent status
+       setPermittedTeachers(permittedList);
+       setAbsentTeachers(absentList);
+
      } catch (error) {
-       console.error("Error fetching data:", error);
+       console.error("Error fetching attendance data:", error);
        toast.error("Gagal memuat data kehadiran");
      } finally {
        setLoading(false);
      }
    };
-   fetchData();
- }, [schoolId, filters.month]);
- // Apply filters when filter state changes
- useEffect(() => {
-   let data = [...attendanceData];
 
-   // Filter by role
-   if (filters.role !== "all") {
-     data = data.filter(teacher => teacher.role === filters.role);
-   }
+   fetchAttendanceData();
+ }, [schoolId, startDate, endDate]);
 
-   // Sort data
-   data.sort((a, b) => {
-     if (filters.sortBy === 'name') {
-       return filters.sortDirection === 'asc'
-         ? a.name.localeCompare(b.name)
-         : b.name.localeCompare(a.name);
-     } else if (filters.sortBy === 'position') {
-       return filters.sortDirection === 'asc'
-         ? a.position.localeCompare(b.position)
-         : b.position.localeCompare(a.position);
-     } else if (filters.sortBy === 'present') {
-       return filters.sortDirection === 'asc'
-         ? a.present - b.present
-         : b.present - a.present;
-     } else if (filters.sortBy === 'total') {
-       return filters.sortDirection === 'asc'
-         ? a.total - b.total
-         : b.total - a.total;
-     }
-     return 0;
-   });
-
-   setFilteredData(data);
- }, [attendanceData, filters]);
- // Toggle sort direction
- const toggleSort = (field: string) => {
-   setFilters(prev => ({
-     ...prev,
-     sortBy: field,
-     sortDirection: prev.sortBy === field && prev.sortDirection === 'asc' ? 'desc' : 'asc'
-   }));
- };
- // Generate and download PDF report
- const handleGeneratePDF = async () => {
-   if (filteredData.length === 0) {
-     toast.error("Tidak ada data untuk dicetak");
-     return;
-   }
-
-   setGenerating(true);
+ // Generate data for pie chart
+ const pieChartData = [
+   { name: 'Hadir', value: statusCounts.present, color: COLORS.present },
+   { name: 'Terlambat', value: statusCounts.late, color: COLORS.late },
+   { name: 'Izin', value: statusCounts.permitted, color: COLORS.permitted },
+   { name: 'Alpha', value: statusCounts.absent, color: COLORS.absent }
+ ].filter(item => item.value > 0);
+ // Function to generate PDF with IZIN and ALPHA lists
+ const generatePDF = async () => {
    try {
-     const doc = new jsPDF();
+     setIsDownloading(true);
+
+     const doc = new jsPDF({
+       orientation: 'portrait',
+       unit: 'mm',
+       format: 'a4'
+     });
+
      const pageWidth = doc.internal.pageSize.getWidth();
      const pageHeight = doc.internal.pageSize.getHeight();
      const margin = 15;
 
-     // Add header
+     // Add header with school info
      doc.setFontSize(16);
-     doc.setFont("helvetica", "bold");
-     doc.text(schoolInfo.name.toUpperCase(), pageWidth / 2, margin, { align: "center" });
-
+     doc.setFont('helvetica', 'bold');
+     doc.text(schoolInfo.name.toUpperCase(), pageWidth / 2, margin, { align: 'center' });
      doc.setFontSize(11);
-     doc.setFont("helvetica", "normal");
-     doc.text(schoolInfo.address, pageWidth / 2, margin + 7, { align: "center" });
-     doc.text(`NPSN: ${schoolInfo.npsn}`, pageWidth / 2, margin + 12, { align: "center" });
+     doc.setFont('helvetica', 'normal');
+     doc.text(schoolInfo.address, pageWidth / 2, margin + 7, { align: 'center' });
+     doc.text(`NPSN: ${schoolInfo.npsn}`, pageWidth / 2, margin + 14, { align: 'center' });
 
      // Add horizontal line
      doc.setLineWidth(0.5);
-     doc.line(margin, margin + 16, pageWidth - margin, margin + 16);
+     doc.line(margin, margin + 20, pageWidth - margin, margin + 20);
 
      // Add title
      doc.setFontSize(14);
-     doc.setFont("helvetica", "bold");
-     doc.text("REKAP KEHADIRAN GURU DAN TENDIK", pageWidth / 2, margin + 25, { align: "center" });
+     doc.setFont('helvetica', 'bold');
+     doc.text('LAPORAN KEHADIRAN GURU DAN TENAGA KEPENDIDIKAN', pageWidth / 2, margin + 30, { align: 'center' });
 
-     // Add filters info
+     // Add date range
+     const startDateFormatted = format(parseISO(startDate), 'd MMMM yyyy', { locale: id });
+     const endDateFormatted = format(parseISO(endDate), 'd MMMM yyyy', { locale: id });
+     doc.setFontSize(11);
+     doc.text(`Periode: ${startDateFormatted} - ${endDateFormatted}`, pageWidth / 2, margin + 40, { align: 'center' });
+
+     // Add summary table
+     doc.setFontSize(12);
+     doc.text('RINGKASAN KEHADIRAN', margin, margin + 55);
+
+     let yPos = margin + 65;
+     const tableHeaders = ['Status', 'Jumlah', 'Persentase'];
+     const columnWidths = [40, 25, 25];
+     const rowHeight = 10;
+
+     // Draw table header with background
+     doc.setFillColor(230, 230, 230);
+     doc.rect(margin, yPos, columnWidths.reduce((a, b) => a + b), rowHeight, 'F');
+     doc.setFont('helvetica', 'bold');
      doc.setFontSize(10);
-     doc.setFont("helvetica", "normal");
-     const monthDate = new Date(parseInt(filters.month.split('-')[0]), parseInt(filters.month.split('-')[1]) - 1, 1);
-     const monthName = format(monthDate, "MMMM yyyy", { locale: id });
-     doc.text(`Bulan: ${monthName}`, pageWidth / 2, margin + 32, { align: "center" });
-     doc.text(`Kategori: ${roles[filters.role as keyof typeof roles]}`, pageWidth / 2, margin + 38, { align: "center" });
-
-     // Create table
-     const headers = ["No", "Nama", "Jabatan", "Hadir", "Izin", "Alpha", "Total"];
-     const colWidths = [10, 60, 40, 18, 18, 18, 20];
-     const tableTop = margin + 45;
-     let yPos = tableTop;
-
-     // Table header
-     doc.setFillColor(220, 220, 220);
-     doc.rect(margin, yPos, colWidths.reduce((a, b) => a + b, 0), 10, "F");
-     doc.setFont("helvetica", "bold");
 
      let xPos = margin;
-     for (let i = 0; i < headers.length; i++) {
-       const align = i === 0 || i >= 3 ? "center" : "left";
-       const xOffset = i === 0 || i >= 3 ? colWidths[i] / 2 : 3;
-       doc.text(headers[i], xPos + xOffset, yPos + 6.5, i === 0 || i >= 3 ? { align } : undefined);
-       xPos += colWidths[i];
-     }
+     tableHeaders.forEach((header, i) => {
+       doc.text(header, xPos + columnWidths[i] / 2, yPos + 7, { align: 'center' });
+       xPos += columnWidths[i];
+     });
+     yPos += rowHeight;
 
-     yPos += 10;
+     // Draw table rows
+     doc.setFont('helvetica', 'normal');
+     const total = statusCounts.total || 1; // Prevent division by zero
 
-     // Table rows
-     doc.setFont("helvetica", "normal");
+     const rows = [
+       ['Hadir', statusCounts.present.toString(), `${Math.round(statusCounts.present / total * 100)}%`],
+       ['Terlambat', statusCounts.late.toString(), `${Math.round(statusCounts.late / total * 100)}%`],
+       ['Izin', statusCounts.permitted.toString(), `${Math.round(statusCounts.permitted / total * 100)}%`],
+       ['Alpha', statusCounts.absent.toString(), `${Math.round(statusCounts.absent / total * 100)}%`],
+       ['Total', statusCounts.total.toString(), '100%']
+     ];
 
-     filteredData.forEach((teacher, index) => {
-       // Check if we need a new page
-       if (yPos > pageHeight - 30) {
-         doc.addPage();
-         yPos = margin;
-
-         // Add header to new page
-         doc.setFillColor(220, 220, 220);
-         doc.rect(margin, yPos, colWidths.reduce((a, b) => a + b, 0), 10, "F");
-         doc.setFont("helvetica", "bold");
-
-         xPos = margin;
-         for (let i = 0; i < headers.length; i++) {
-           const align = i === 0 || i >= 3 ? "center" : "left";
-           const xOffset = i === 0 || i >= 3 ? colWidths[i] / 2 : 3;
-           doc.text(headers[i], xPos + xOffset, yPos + 6.5, i === 0 || i >= 3 ? { align } : undefined);
-           xPos += colWidths[i];
-         }
-
-         yPos += 10;
-         doc.setFont("helvetica", "normal");
-       }
-
-       // Zebra striping
-       if (index % 2 === 0) {
+     rows.forEach((row, rowIndex) => {
+       // Add background for alternating rows
+       if (rowIndex % 2 === 0) {
          doc.setFillColor(245, 245, 245);
-         doc.rect(margin, yPos, colWidths.reduce((a, b) => a + b, 0), 8, "F");
+         doc.rect(margin, yPos, columnWidths.reduce((a, b) => a + b), rowHeight, 'F');
        }
 
-       // Row data
        xPos = margin;
-
-       // No.
-       doc.text((index + 1).toString(), xPos + colWidths[0] / 2, yPos + 5, { align: "center" });
-       xPos += colWidths[0];
-
-       // Name
-       let displayName = teacher.name;
-       if (displayName.length > 25) {
-         displayName = displayName.substring(0, 22) + "...";
-       }
-       doc.text(displayName, xPos + 3, yPos + 5);
-       xPos += colWidths[1];
-
-       // Position
-       let displayPosition = teacher.position;
-       if (displayPosition.length > 18) {
-         displayPosition = displayPosition.substring(0, 15) + "...";
-       }
-       doc.text(displayPosition, xPos + 3, yPos + 5);
-       xPos += colWidths[2];
-
-       // Present
-       doc.text(teacher.present.toString(), xPos + colWidths[3] / 2, yPos + 5, { align: "center" });
-       xPos += colWidths[3];
-
-       // Permitted
-       doc.text(teacher.permitted.toString(), xPos + colWidths[4] / 2, yPos + 5, { align: "center" });
-       xPos += colWidths[4];
-
-       // Absent
-       doc.text(teacher.absent.toString(), xPos + colWidths[5] / 2, yPos + 5, { align: "center" });
-       xPos += colWidths[5];
-
-       // Total
-       doc.text(teacher.total.toString(), xPos + colWidths[6] / 2, yPos + 5, { align: "center" });
-
-       yPos += 8;
+       row.forEach((cell, cellIndex) => {
+         doc.text(cell, xPos + columnWidths[cellIndex] / 2, yPos + 7, { align: 'center' });
+         xPos += columnWidths[cellIndex];
+       });
+       yPos += rowHeight;
      });
 
-     // Summary footer
+     // Add IZIN list title
      yPos += 10;
-     const totalPresent = filteredData.reduce((sum, teacher) => sum + teacher.present, 0);
-     const totalPermitted = filteredData.reduce((sum, teacher) => sum + teacher.permitted, 0);
-     const totalAbsent = filteredData.reduce((sum, teacher) => sum + teacher.absent, 0);
-     const grandTotal = totalPresent + totalPermitted + totalAbsent;
+     doc.setFontSize(12);
+     doc.setFont('helvetica', 'bold');
+     doc.text('DAFTAR GURU DENGAN STATUS IZIN', margin, yPos);
+     yPos += 10;
+
+     // Add IZIN table headers
+     const izinHeaders = ['No', 'Nama', 'Tanggal', 'Waktu'];
+     const izinWidths = [10, 60, 30, 30];
 
      doc.setFillColor(230, 230, 230);
-     doc.rect(margin, yPos, colWidths.reduce((a, b) => a + b, 0), 10, "F");
-     doc.setFont("helvetica", "bold");
+     doc.rect(margin, yPos, izinWidths.reduce((a, b) => a + b), rowHeight, 'F');
 
      xPos = margin;
-     doc.text("TOTAL", xPos + (colWidths[0] + colWidths[1] + colWidths[2]) / 2, yPos + 6.5, { align: "center" });
-     xPos += (colWidths[0] + colWidths[1] + colWidths[2]);
+     izinHeaders.forEach((header, i) => {
+       doc.text(header, xPos + izinWidths[i] / 2, yPos + 7, { align: 'center' });
+       xPos += izinWidths[i];
+     });
+     yPos += rowHeight;
 
-     doc.text(totalPresent.toString(), xPos + colWidths[3] / 2, yPos + 6.5, { align: "center" });
-     xPos += colWidths[3];
+     // Add IZIN table rows
+     doc.setFont('helvetica', 'normal');
 
-     doc.text(totalPermitted.toString(), xPos + colWidths[4] / 2, yPos + 6.5, { align: "center" });
-     xPos += colWidths[4];
+     if (permittedTeachers.length === 0) {
+       doc.text('Tidak ada data', margin + 50, yPos + 7);
+       yPos += rowHeight;
+     } else {
+       permittedTeachers.slice(0, 10).forEach((teacher, index) => {
+         if (yPos > pageHeight - 40) {
+           // Add new page if we're getting close to the bottom
+           doc.addPage();
+           yPos = margin + 20;
+           doc.setFont('helvetica', 'bold');
+           doc.text('DAFTAR GURU DENGAN STATUS IZIN (Lanjutan)', margin, yPos);
+           yPos += 10;
 
-     doc.text(totalAbsent.toString(), xPos + colWidths[5] / 2, yPos + 6.5, { align: "center" });
-     xPos += colWidths[5];
+           // Add header again on new page
+           doc.setFillColor(230, 230, 230);
+           doc.rect(margin, yPos, izinWidths.reduce((a, b) => a + b), rowHeight, 'F');
 
-     doc.text(grandTotal.toString(), xPos + colWidths[6] / 2, yPos + 6.5, { align: "center" });
+           xPos = margin;
+           izinHeaders.forEach((header, i) => {
+             doc.text(header, xPos + izinWidths[i] / 2, yPos + 7, { align: 'center' });
+             xPos += izinWidths[i];
+           });
+           yPos += rowHeight;
+           doc.setFont('helvetica', 'normal');
+         }
 
-     // Add signature section
-     yPos += 25;
-     const currentDate = format(new Date(), "d MMMM yyyy", { locale: id });
-     doc.setFont("helvetica", "normal");
-     doc.setFontSize(10);
-     doc.text(`${schoolInfo.address}, ${currentDate}`, pageWidth - margin - 40, yPos, { align: "right" });
+         // Add background for alternating rows
+         if (index % 2 === 0) {
+           doc.setFillColor(245, 245, 245);
+           doc.rect(margin, yPos, izinWidths.reduce((a, b) => a + b), rowHeight, 'F');
+         }
 
+         xPos = margin;
+         const formattedDate = format(parseISO(teacher.date), 'dd/MM/yyyy');
+
+         [
+           (index + 1).toString(),
+           teacher.name,
+           formattedDate,
+           teacher.time
+         ].forEach((cell, cellIndex) => {
+           const textAlign = cellIndex === 1 ? 'left' : 'center';
+           const xOffset = cellIndex === 1 ? 3 : izinWidths[cellIndex] / 2;
+           doc.text(cell, xPos + xOffset, yPos + 7, { align: textAlign });
+           xPos += izinWidths[cellIndex];
+         });
+
+         yPos += rowHeight;
+       });
+     }
+
+     // Add "Continued on next page" if needed
+     if (permittedTeachers.length > 10) {
+       doc.setFont('helvetica', 'italic');
+       doc.text(`... dan ${permittedTeachers.length - 10} guru izin lainnya`, margin, yPos + 7);
+       yPos += rowHeight + 5;
+     }
+
+     // Add ALPHA list title
      yPos += 10;
-     doc.text("Mengetahui,", margin + 30, yPos, { align: "center" });
-     doc.text("Kepala Sekolah", margin + 30, yPos + 5, { align: "center" });
+     if (yPos > pageHeight - 60) {
+       doc.addPage();
+       yPos = margin + 20;
+     }
 
-     doc.text("Dibuat oleh,", pageWidth - margin - 30, yPos, { align: "center" });
-     doc.text("Administrator", pageWidth - margin - 30, yPos + 5, { align: "center" });
+     doc.setFontSize(12);
+     doc.setFont('helvetica', 'bold');
+     doc.text('DAFTAR GURU DENGAN STATUS ALPHA', margin, yPos);
+     yPos += 10;
 
-     yPos += 30;
-     doc.setFont("helvetica", "bold");
-     doc.text(schoolInfo.principalName, margin + 30, yPos, { align: "center" });
-     doc.setFont("helvetica", "normal");
-     doc.text(`NIP. ${schoolInfo.principalNip}`, margin + 30, yPos + 5, { align: "center" });
+     // Add ALPHA table headers
+     const alphaHeaders = ['No', 'Nama', 'Tanggal', 'Status'];
+     const alphaWidths = [10, 60, 30, 30];
+
+     doc.setFillColor(230, 230, 230);
+     doc.rect(margin, yPos, alphaWidths.reduce((a, b) => a + b), rowHeight, 'F');
+
+     xPos = margin;
+     alphaHeaders.forEach((header, i) => {
+       doc.text(header, xPos + alphaWidths[i] / 2, yPos + 7, { align: 'center' });
+       xPos += alphaWidths[i];
+     });
+     yPos += rowHeight;
+
+     // Add ALPHA table rows
+     doc.setFont('helvetica', 'normal');
+
+     if (absentTeachers.length === 0) {
+       doc.text('Tidak ada data', margin + 50, yPos + 7);
+       yPos += rowHeight;
+     } else {
+       absentTeachers.slice(0, 10).forEach((teacher, index) => {
+         if (yPos > pageHeight - 40) {
+           // Add new page if we're getting close to the bottom
+           doc.addPage();
+           yPos = margin + 20;
+           doc.setFont('helvetica', 'bold');
+           doc.text('DAFTAR GURU DENGAN STATUS ALPHA (Lanjutan)', margin, yPos);
+           yPos += 10;
+
+           // Add header again on new page
+           doc.setFillColor(230, 230, 230);
+           doc.rect(margin, yPos, alphaWidths.reduce((a, b) => a + b), rowHeight, 'F');
+
+           xPos = margin;
+           alphaHeaders.forEach((header, i) => {
+             doc.text(header, xPos + alphaWidths[i] / 2, yPos + 7, { align: 'center' });
+             xPos += alphaWidths[i];
+           });
+           yPos += rowHeight;
+           doc.setFont('helvetica', 'normal');
+         }
+
+         // Add background for alternating rows
+         if (index % 2 === 0) {
+           doc.setFillColor(245, 245, 245);
+           doc.rect(margin, yPos, alphaWidths.reduce((a, b) => a + b), rowHeight, 'F');
+         }
+
+         xPos = margin;
+         const formattedDate = format(parseISO(teacher.date), 'dd/MM/yyyy');
+
+         [
+           (index + 1).toString(),
+           teacher.name,
+           formattedDate,
+           teacher.status
+         ].forEach((cell, cellIndex) => {
+           const textAlign = cellIndex === 1 ? 'left' : 'center';
+           const xOffset = cellIndex === 1 ? 3 : alphaWidths[cellIndex] / 2;
+           doc.text(cell, xPos + xOffset, yPos + 7, { align: textAlign });
+           xPos += alphaWidths[cellIndex];
+         });
+
+         yPos += rowHeight;
+       });
+     }
+
+     // Add "Continued on next page" if needed
+     if (absentTeachers.length > 10) {
+       doc.setFont('helvetica', 'italic');
+       doc.text(`... dan ${absentTeachers.length - 10} guru alpha lainnya`, margin, yPos + 7);
+     }
+
+     // Add footer
+     const today = format(new Date(), 'd MMMM yyyy', { locale: id });
+     yPos = pageHeight - 40;
+
+     doc.text(`${schoolInfo.address}, ${today}`, pageWidth - margin, yPos, { align: 'right' });
+     yPos += 10;
+
+     doc.text('Kepala Sekolah', pageWidth - margin, yPos, { align: 'right' });
+     yPos += 20;
+
+     doc.text(schoolInfo.principalName, pageWidth - margin, yPos, { align: 'right' });
+     yPos += 5;
+
+     doc.text(`NIP. ${schoolInfo.principalNip}`, pageWidth - margin, yPos, { align: 'right' });
 
      // Save the PDF
-     const monthStr = format(monthDate, "MM-yyyy");
-     const fileName = `Rekap_Kehadiran_Guru_${monthStr}.pdf`;
+     const fileName = `Laporan_Kehadiran_Guru_${format(new Date(), 'yyyyMMdd')}.pdf`;
      doc.save(fileName);
-     toast.success(`PDF berhasil diunduh: ${fileName}`);
+
+     toast.success(`Laporan PDF berhasil diunduh: ${fileName}`);
+
    } catch (error) {
      console.error("Error generating PDF:", error);
      toast.error("Gagal mengunduh laporan PDF");
    } finally {
-     setGenerating(false);
+     setIsDownloading(false);
    }
  };
- // Generate and download Excel report
- const handleGenerateExcel = async () => {
-   if (filteredData.length === 0) {
-     toast.error("Tidak ada data untuk dicetak");
-     return;
-   }
 
-   setGenerating(true);
+ // Function to generate Excel with IZIN and ALPHA lists
+ const generateExcel = async () => {
    try {
+     setIsDownloading(true);
+
+     // Dynamically import xlsx
+     const XLSX = await import('xlsx');
+
+     // Create workbook
      const wb = XLSX.utils.book_new();
 
-     // Create header data
-     const monthDate = new Date(parseInt(filters.month.split('-')[0]), parseInt(filters.month.split('-')[1]) - 1, 1);
-     const monthName = format(monthDate, "MMMM yyyy", { locale: id });
-
-     const headerData = [
-       [schoolInfo.name.toUpperCase()],
-       [schoolInfo.address],
+     // Create summary worksheet
+     const summaryData = [
+       [`${schoolInfo.name.toUpperCase()}`],
+       [`${schoolInfo.address}`],
        [`NPSN: ${schoolInfo.npsn}`],
-       [""],
-       ["REKAP KEHADIRAN GURU DAN TENDIK"],
-       [`Bulan: ${monthName}`],
-       [`Kategori: ${roles[filters.role as keyof typeof roles]}`],
-       [""]
+       [`LAPORAN KEHADIRAN GURU DAN TENAGA KEPENDIDIKAN`],
+       [`Periode: ${format(parseISO(startDate), 'd MMMM yyyy', { locale: id })} - ${format(parseISO(endDate), 'd MMMM yyyy', { locale: id })}`],
+       [],
+       ['RINGKASAN KEHADIRAN'],
+       ['Status', 'Jumlah', 'Persentase']
      ];
 
-     // Create table headers
-     const tableHeaders = ["No", "Nama", "Jabatan", "Hadir", "Izin", "Alpha", "Total"];
-     headerData.push(tableHeaders);
-
-     // Add table rows
-     filteredData.forEach((teacher, index) => {
-       headerData.push([
-         index + 1,
-         teacher.name,
-         teacher.position,
-         teacher.present,
-         teacher.permitted,
-         teacher.absent,
-         teacher.total
-       ]);
-     });
-
-     // Add total row
-     const totalPresent = filteredData.reduce((sum, teacher) => sum + teacher.present, 0);
-     const totalPermitted = filteredData.reduce((sum, teacher) => sum + teacher.permitted, 0);
-     const totalAbsent = filteredData.reduce((sum, teacher) => sum + teacher.absent, 0);
-     const grandTotal = totalPresent + totalPermitted + totalAbsent;
-
-     headerData.push(["TOTAL", "", "", totalPresent, totalPermitted, totalAbsent, grandTotal]);
-
-     // Add signature section
-     const currentDate = format(new Date(), "d MMMM yyyy", { locale: id });
-     headerData.push(
-       [""],
-       [""],
-       [`${schoolInfo.address}, ${currentDate}`],
-       [""],
-       ["Mengetahui,", "", "", "", "", "", "Dibuat oleh,"],
-       ["Kepala Sekolah", "", "", "", "", "", "Administrator"],
-       ["", "", "", "", "", "", ""],
-       ["", "", "", "", "", "", ""],
-       [schoolInfo.principalName, "", "", "", "", "", "Administrator"],
-       [`NIP. ${schoolInfo.principalNip}`, "", "", "", "", "", ""],
+     const total = statusCounts.total || 1;
+     summaryData.push(
+       ['Hadir', statusCounts.present, `${Math.round(statusCounts.present / total * 100)}%`],
+       ['Terlambat', statusCounts.late, `${Math.round(statusCounts.late / total * 100)}%`],
+       ['Izin', statusCounts.permitted, `${Math.round(statusCounts.permitted / total * 100)}%`],
+       ['Alpha', statusCounts.absent, `${Math.round(statusCounts.absent / total * 100)}%`],
+       ['Total', statusCounts.total, '100%']
      );
 
-     // Create worksheet
-     const ws = XLSX.utils.aoa_to_sheet(headerData);
+     summaryData.push(
+       [],
+       ['DAFTAR GURU DENGAN STATUS IZIN'],
+       ['No', 'Nama', 'Tanggal', 'Waktu']
+     );
+
+     if (permittedTeachers.length === 0) {
+       summaryData.push(['', 'Tidak ada data', '', '']);
+     } else {
+       permittedTeachers.forEach((teacher, index) => {
+         summaryData.push([
+           index + 1,
+           teacher.name,
+           format(parseISO(teacher.date), 'dd/MM/yyyy'),
+           teacher.time
+         ]);
+       });
+     }
+
+     summaryData.push(
+       [],
+       ['DAFTAR GURU DENGAN STATUS ALPHA'],
+       ['No', 'Nama', 'Tanggal', 'Status']
+     );
+
+     if (absentTeachers.length === 0) {
+       summaryData.push(['', 'Tidak ada data', '', '']);
+     } else {
+       absentTeachers.forEach((teacher, index) => {
+         summaryData.push([
+           index + 1,
+           teacher.name,
+           format(parseISO(teacher.date), 'dd/MM/yyyy'),
+           teacher.status
+         ]);
+       });
+     }
+
+     const ws = XLSX.utils.aoa_to_sheet(summaryData);
 
      // Set column widths
      const colWidths = [
-       { wch: 5 },  // No
-       { wch: 30 }, // Nama
-       { wch: 25 }, // Jabatan
-       { wch: 10 }, // Hadir
-       { wch: 10 }, // Izin
-       { wch: 10 }, // Alpha
-       { wch: 10 }  // Total
+       { wch: 10 }, // No
+       { wch: 30 }, // Name
+       { wch: 15 }, // Date
+       { wch: 15 }, // Status/Time
      ];
-
      ws['!cols'] = colWidths;
 
      // Add worksheet to workbook
-     XLSX.utils.book_append_sheet(wb, ws, "Rekap Kehadiran");
+     XLSX.utils.book_append_sheet(wb, ws, 'Kehadiran Guru');
 
-     // Save Excel file
-     const monthStr = format(monthDate, "MM-yyyy");
-     const fileName = `Rekap_Kehadiran_Guru_${monthStr}.xlsx`;
+     // Generate separate worksheets for IZIN and ALPHA details
+     if (permittedTeachers.length > 0) {
+       const izinData = [
+         ['DAFTAR GURU DENGAN STATUS IZIN'],
+         [],
+         ['No', 'Nama', 'Tanggal', 'Waktu']
+       ];
+
+       permittedTeachers.forEach((teacher, index) => {
+         izinData.push([
+           index + 1,
+           teacher.name,
+           format(parseISO(teacher.date), 'dd/MM/yyyy'),
+           teacher.time
+         ]);
+       });
+
+       const izinWs = XLSX.utils.aoa_to_sheet(izinData);
+       izinWs['!cols'] = colWidths;
+       XLSX.utils.book_append_sheet(wb, izinWs, 'Guru IZIN');
+     }
+
+     if (absentTeachers.length > 0) {
+       const alphaData = [
+         ['DAFTAR GURU DENGAN STATUS ALPHA'],
+         [],
+         ['No', 'Nama', 'Tanggal', 'Status']
+       ];
+
+       absentTeachers.forEach((teacher, index) => {
+         alphaData.push([
+           index + 1,
+           teacher.name,
+           format(parseISO(teacher.date), 'dd/MM/yyyy'),
+           teacher.status
+         ]);
+       });
+
+       const alphaWs = XLSX.utils.aoa_to_sheet(alphaData);
+       alphaWs['!cols'] = colWidths;
+       XLSX.utils.book_append_sheet(wb, alphaWs, 'Guru ALPHA');
+     }
+
+     // Generate filename with current date
+     const fileName = `Laporan_Kehadiran_Guru_${format(new Date(), 'yyyyMMdd')}.xlsx`;
+
+     // Write file and trigger download
      XLSX.writeFile(wb, fileName);
-     toast.success(`Excel berhasil diunduh: ${fileName}`);
+
+     toast.success(`Laporan Excel berhasil diunduh: ${fileName}`);
+
    } catch (error) {
      console.error("Error generating Excel:", error);
      toast.error("Gagal mengunduh laporan Excel");
    } finally {
-     setGenerating(false);
+     setIsDownloading(false);
    }
  };
  return (
-   <div className="w-full max-w-7xl mx-auto px-3 sm:px-4 md:px-6 pb-20 md:pb-6">
+   <div className="w-full max-w-6xl mx-auto pb-20 md:pb-6">
      <div className="flex items-center mb-6">
        <Link href="/dashboard/absensi-guru" className="p-2 mr-2 hover:bg-gray-100 rounded-full">
          <ArrowLeft size={20} />
        </Link>
-       <h1 className="text-2xl font-bold text-gray-800">Laporan Kehadiran Guru dan Tendik</h1>
+       <h1 className="text-2xl font-bold text-gray-800">Laporan Kehadiran Guru & Tendik</h1>
      </div>
 
-     {/* Filters */}
-     <div className="bg-white rounded-xl shadow-sm p-5 mb-6">
-       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-         <div>
-           <label htmlFor="month" className="block text-sm font-medium text-gray-700 mb-2">
-             <Calendar className="h-4 w-4 inline-block mr-1" /> Bulan
-           </label>
-           <input
-             type="month"
-             id="month"
-             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary"
-             value={filters.month}
-             onChange={(e) => setFilters(prev => ({ ...prev, month: e.target.value }))}
-           />
-         </div>
+     {/* Date Range Selection */}
+     <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
+       <h2 className="text-lg font-semibold mb-4 flex items-center">
+         <Calendar className="mr-2 h-5 w-5 text-indigo-600" />
+         Pilih Rentang Waktu
+       </h2>
 
-         <div>
-           <label htmlFor="role" className="block text-sm font-medium text-gray-700 mb-2">
-             <Filter className="h-4 w-4 inline-block mr-1" /> Kategori
-           </label>
-           <select
-             id="role"
-             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary"
-             value={filters.role}
-             onChange={(e) => setFilters(prev => ({ ...prev, role: e.target.value }))}
-           >
-             <option value="all">Semua</option>
-             <option value="teacher">Guru</option>
-             <option value="staff">Tenaga Kependidikan</option>
-           </select>
-         </div>
-
-         <div className="flex items-end gap-2">
-           <button
-             onClick={handleGeneratePDF}
-             disabled={generating || loading}
-             className="flex-1 flex items-center justify-center gap-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors"
-           >
-             {generating ? <Loader2 className="h-5 w-5 animate-spin" /> : <FileText className="h-5 w-5" />}
-             <span>PDF</span>
-           </button>
-
-           <button
-             onClick={handleGenerateExcel}
-             disabled={generating || loading}
-             className="flex-1 flex items-center justify-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors"
-           >
-             {generating ? <Loader2 className="h-5 w-5 animate-spin" /> : <FileSpreadsheet className="h-5 w-5" />}
-             <span>Excel</span>
-           </button>
-         </div>
-       </div>
-     </div>
-
-     {/* Attendance table */}
-     <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-       <div className="p-6 pb-0">
-         <h2 className="text-xl font-bold text-gray-800 mb-4">REKAP KEHADIRAN GURU DAN TENDIK</h2>
+       <div className="flex flex-wrap gap-3 mb-4">
+         <button
+           onClick={() => setDateRange('today')}
+           className={`px-4 py-2 rounded-lg text-sm font-medium ${
+             dateRange === 'today'
+               ? 'bg-indigo-100 text-indigo-700 border border-indigo-300'
+               : 'bg-gray-100 text-gray-700 border border-gray-200 hover:bg-gray-200'
+           }`}
+         >
+           Hari Ini
+         </button>
+         <button
+           onClick={() => setDateRange('week')}
+           className={`px-4 py-2 rounded-lg text-sm font-medium ${
+             dateRange === 'week'
+               ? 'bg-indigo-100 text-indigo-700 border border-indigo-300'
+               : 'bg-gray-100 text-gray-700 border border-gray-200 hover:bg-gray-200'
+           }`}
+         >
+           7 Hari Terakhir
+         </button>
+         <button
+           onClick={() => setDateRange('month')}
+           className={`px-4 py-2 rounded-lg text-sm font-medium ${
+             dateRange === 'month'
+               ? 'bg-indigo-100 text-indigo-700 border border-indigo-300'
+               : 'bg-gray-100 text-gray-700 border border-gray-200 hover:bg-gray-200'
+           }`}
+         >
+           30 Hari Terakhir
+         </button>
+         <button
+           onClick={() => setDateRange('custom')}
+           className={`px-4 py-2 rounded-lg text-sm font-medium ${
+             dateRange === 'custom'
+               ? 'bg-indigo-100 text-indigo-700 border border-indigo-300'
+               : 'bg-gray-100 text-gray-700 border border-gray-200 hover:bg-gray-200'
+           }`}
+         >
+           Kustom
+         </button>
        </div>
 
-       {loading ? (
-         <div className="flex justify-center items-center h-64">
-           <Loader2 className="h-12 w-12 text-primary animate-spin" />
-         </div>
-       ) : filteredData.length > 0 ? (
-         <div className="overflow-x-auto">
-           <table className="w-full">
-             <thead>
-               <tr className="bg-gray-50 border-b border-gray-200">
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div className="flex items-center justify-center">
-                     No
-                   </div>
-                 </th>
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div
-                     className="flex items-center cursor-pointer"
-                     onClick={() => toggleSort('name')}
-                   >
-                     Nama
-                     {filters.sortBy === 'name' && (
-                       filters.sortDirection === 'asc' ?
-                         <ChevronUp size={16} className="ml-1" /> :
-                         <ChevronDown size={16} className="ml-1" />
-                     )}
-                   </div>
-                 </th>
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div
-                     className="flex items-center cursor-pointer"
-                     onClick={() => toggleSort('position')}
-                   >
-                     Jabatan
-                     {filters.sortBy === 'position' && (
-                       filters.sortDirection === 'asc' ?
-                         <ChevronUp size={16} className="ml-1" /> :
-                         <ChevronDown size={16} className="ml-1" />
-                     )}
-                   </div>
-                 </th>
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div
-                     className="flex items-center justify-center cursor-pointer"
-                     onClick={() => toggleSort('present')}
-                   >
-                     Hadir
-                     {filters.sortBy === 'present' && (
-                       filters.sortDirection === 'asc' ?
-                         <ChevronUp size={16} className="ml-1" /> :
-                         <ChevronDown size={16} className="ml-1" />
-                     )}
-                   </div>
-                 </th>
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div className="flex items-center justify-center">
-                     Izin
-                   </div>
-                 </th>
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div className="flex items-center justify-center">
-                     Alpha
-                   </div>
-                 </th>
-                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase">
-                   <div
-                     className="flex items-center justify-center cursor-pointer"
-                     onClick={() => toggleSort('total')}
-                   >
-                     Total
-                     {filters.sortBy === 'total' && (
-                       filters.sortDirection === 'asc' ?
-                         <ChevronUp size={16} className="ml-1" /> :
-                         <ChevronDown size={16} className="ml-1" />
-                     )}
-                   </div>
-                 </th>
-               </tr>
-             </thead>
-             <tbody className="divide-y divide-gray-200">
-               {filteredData.map((teacher, index) => (
-                 <motion.tr
-                   key={teacher.id}
-                   initial={{ opacity: 0, y: 5 }}
-                   animate={{ opacity: 1, y: 0 }}
-                   transition={{
-                     duration: 0.2,
-                     delay: index * 0.03,
-                     ease: "easeOut"
-                   }}
-                   className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
-                 >
-                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
-                     {index + 1}
-                   </td>
-                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                     {teacher.name}
-                   </td>
-                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                     {teacher.position}
-                   </td>
-                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
-                     <span className="bg-green-100 text-green-800 px-2.5 py-0.5 rounded-full">
-                       {teacher.present}
-                     </span>
-                   </td>
-                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
-                     <span className="bg-blue-100 text-blue-800 px-2.5 py-0.5 rounded-full">
-                       {teacher.permitted}
-                     </span>
-                   </td>
-                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
-                     <span className="bg-red-100 text-red-800 px-2.5 py-0.5 rounded-full">
-                       {teacher.absent}
-                     </span>
-                   </td>
-                   <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-gray-900 text-center">
-                     {teacher.total}
-                   </td>
-                 </motion.tr>
-               ))}
-             </tbody>
-             <tfoot>
-               <tr className="bg-gray-100 font-semibold text-gray-900">
-                 <td colSpan={3} className="px-6 py-3 text-right">TOTAL</td>
-                 <td className="px-6 py-3 text-center">{filteredData.reduce((sum, t) => sum + t.present, 0)}</td>
-                 <td className="px-6 py-3 text-center">{filteredData.reduce((sum, t) => sum + t.permitted, 0)}</td>
-                 <td className="px-6 py-3 text-center">{filteredData.reduce((sum, t) => sum + t.absent, 0)}</td>
-                 <td className="px-6 py-3 text-center">{filteredData.reduce((sum, t) => sum + t.total, 0)}</td>
-               </tr>
-             </tfoot>
-           </table>
-         </div>
-       ) : (
-         <div className="text-center py-20">
-           <h3 className="text-lg font-medium text-gray-500 mb-2">Data tidak ditemukan</h3>
-           <p className="text-gray-400">Tidak ada data kehadiran yang sesuai dengan filter</p>
+       {dateRange === 'custom' && (
+         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+           <div>
+             <label htmlFor="startDate" className="block text-sm font-medium text-gray-700 mb-1">
+               Tanggal Mulai
+             </label>
+             <input
+               type="date"
+               id="startDate"
+               value={startDate}
+               onChange={(e) => setStartDate(e.target.value)}
+               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+             />
+           </div>
+
+           <div>
+             <label htmlFor="endDate" className="block text-sm font-medium text-gray-700 mb-1">
+               Tanggal Akhir
+             </label>
+             <input
+               type="date"
+               id="endDate"
+               value={endDate}
+               onChange={(e) => setEndDate(e.target.value)}
+               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+             />
+           </div>
          </div>
        )}
      </div>
+
+     {loading ? (
+       <div className="flex justify-center items-center h-64">
+         <Loader2 className="h-12 w-12 text-indigo-600 animate-spin" />
+       </div>
+     ) : (
+       <>
+         {/* Summary Cards */}
+         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+           <motion.div
+             initial={{ opacity: 0, y: 20 }}
+             animate={{ opacity: 1, y: 0 }}
+             transition={{ duration: 0.3 }}
+             className="bg-gradient-to-r from-green-500 to-green-600 rounded-xl p-4 text-white shadow-md"
+           >
+             <div className="flex items-center mb-1">
+               <Users className="h-7 w-7 text-white opacity-80 mr-3" />
+               <h3 className="font-semibold text-base">Hadir</h3>
+             </div>
+             <p className="text-3xl font-bold">{statusCounts.present}</p>
+             <p className="text-xs text-green-100 mt-1">
+               {Math.round(statusCounts.present / (statusCounts.total || 1) * 100)}% dari total
+             </p>
+           </motion.div>
+
+           <motion.div
+             initial={{ opacity: 0, y: 20 }}
+             animate={{ opacity: 1, y: 0 }}
+             transition={{ duration: 0.3, delay: 0.1 }}
+             className="bg-gradient-to-r from-yellow-500 to-yellow-600 rounded-xl p-4 text-white shadow-md"
+           >
+             <div className="flex items-center mb-1">
+               <Clock className="h-7 w-7 text-white opacity-80 mr-3" />
+               <h3 className="font-semibold text-base">Terlambat</h3>
+             </div>
+             <p className="text-3xl font-bold">{statusCounts.late}</p>
+             <p className="text-xs text-yellow-100 mt-1">
+               {Math.round(statusCounts.late / (statusCounts.total || 1) * 100)}% dari total
+             </p>
+           </motion.div>
+
+           <motion.div
+             initial={{ opacity: 0, y: 20 }}
+             animate={{ opacity: 1, y: 0 }}
+             transition={{ duration: 0.3, delay: 0.2 }}
+             className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-xl p-4 text-white shadow-md"
+           >
+             <div className="flex items-center mb-1">
+               <Calendar className="h-7 w-7 text-white opacity-80 mr-3" />
+               <h3 className="font-semibold text-base">Izin</h3>
+             </div>
+             <p className="text-3xl font-bold">{statusCounts.permitted}</p>
+             <p className="text-xs text-blue-100 mt-1">
+               {Math.round(statusCounts.permitted / (statusCounts.total || 1) * 100)}% dari total
+             </p>
+           </motion.div>
+
+           <motion.div
+             initial={{ opacity: 0, y: 20 }}
+             animate={{ opacity: 1, y: 0 }}
+             transition={{ duration: 0.3, delay: 0.3 }}
+             className="bg-gradient-to-r from-red-500 to-red-600 rounded-xl p-4 text-white shadow-md"
+           >
+             <div className="flex items-center mb-1">
+               <X className="h-7 w-7 text-white opacity-80 mr-3" />
+               <h3 className="font-semibold text-base">Alpha</h3>
+             </div>
+             <p className="text-3xl font-bold">{statusCounts.absent}</p>
+             <p className="text-xs text-red-100 mt-1">
+               {Math.round(statusCounts.absent / (statusCounts.total || 1) * 100)}% dari total
+             </p>
+           </motion.div>
+         </div>
+
+         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+           {/* Chart Section */}
+           <div className="bg-white rounded-xl shadow-sm p-6">
+             <h2 className="text-lg font-semibold mb-4 flex items-center">
+               <PieChart className="mr-2 h-5 w-5 text-indigo-600" />
+               Distribusi Kehadiran
+             </h2>
+
+             <div className="h-[300px]">
+               <ResponsiveContainer width="100%" height="100%">
+                 <RechartsInternalPieChart>
+                   <Pie
+                     data={pieChartData}
+                     cx="50%"
+                     cy="50%"
+                     labelLine={false}
+                     outerRadius={80}
+                     fill="#8884d8"
+                     dataKey="value"
+                     label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                   >
+                     {pieChartData.map((entry, index) => (
+                       <Cell key={`cell-${index}`} fill={entry.color} />
+                     ))}
+                   </Pie>
+                   <Tooltip formatter={(value) => [`${value} guru`, 'Jumlah']} />
+                 </RechartsInternalPieChart>
+               </ResponsiveContainer>
+             </div>
+           </div>
+
+           {/* Daily Trend Chart */}
+           <div className="bg-white rounded-xl shadow-sm p-6">
+             <h2 className="text-lg font-semibold mb-4 flex items-center">
+               <BarChart2 className="mr-2 h-5 w-5 text-indigo-600" />
+               Tren Kehadiran Harian
+             </h2>
+
+             <div className="h-[300px]">
+               {dailyData.length > 0 ? (
+                 <ResponsiveContainer width="100%" height="100%">
+                   <BarChart data={dailyData}>
+                     <CartesianGrid strokeDasharray="3 3" />
+                     <XAxis
+                       dataKey="date"
+                       tickFormatter={(date) => date.split('-')[2]} // Show only day
+                     />
+                     <YAxis />
+                     <Tooltip
+                       formatter={(value, name) => {
+                         const nameMap = {
+                           present: 'Hadir',
+                           late: 'Terlambat',
+                           permitted: 'Izin',
+                           absent: 'Alpha'
+                         };
+                         return [value, nameMap[name] || name];
+                       }}
+                       labelFormatter={(date) => {
+                         try {
+                           return format(parseISO(date), 'd MMMM yyyy', { locale: id });
+                         } catch (e) {
+                           return date;
+                         }
+                       }}
+                     />
+                     <Legend
+                       formatter={(value) => {
+                         const nameMap = {
+                           present: 'Hadir',
+                           late: 'Terlambat',
+                           permitted: 'Izin',
+                           absent: 'Alpha'
+                         };
+                         return nameMap[value] || value;
+                       }}
+                     />
+                     <Bar dataKey="present" name="present" fill={COLORS.present} />
+                     <Bar dataKey="late" name="late" fill={COLORS.late} />
+                     <Bar dataKey="permitted" name="permitted" fill={COLORS.permitted} />
+                     <Bar dataKey="absent" name="absent" fill={COLORS.absent} />
+                   </BarChart>
+                 </ResponsiveContainer>
+               ) : (
+                 <div className="flex items-center justify-center h-full text-gray-500">
+                   Tidak ada data untuk ditampilkan
+                 </div>
+               )}
+             </div>
+           </div>
+         </div>
+
+         {/* IZIN and ALPHA Tables */}
+         <div className="grid grid-cols-1 gap-6 mb-6">
+           {/* IZIN Table */}
+           <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+             <div className="p-6 border-b border-gray-100">
+               <h2 className="text-lg font-semibold flex items-center text-blue-700">
+                 <Calendar className="mr-2 h-5 w-5" />
+                 Daftar Guru dengan Status IZIN
+               </h2>
+             </div>
+
+             <div className="overflow-x-auto">
+               <table className="w-full">
+                 <thead>
+                   <tr className="bg-blue-50 text-left">
+                     <th className="px-6 py-3 text-xs font-medium text-blue-700 uppercase tracking-wider">No</th>
+                     <th className="px-6 py-3 text-xs font-medium text-blue-700 uppercase tracking-wider">Nama</th>
+                     <th className="px-6 py-3 text-xs font-medium text-blue-700 uppercase tracking-wider">Tanggal</th>
+                     <th className="px-6 py-3 text-xs font-medium text-blue-700 uppercase tracking-wider">Waktu</th>
+                   </tr>
+                 </thead>
+                 <tbody className="divide-y divide-gray-200">
+                   {permittedTeachers.length > 0 ? (
+                     permittedTeachers.map((teacher, index) => (
+                       <tr key={index} className="hover:bg-gray-50">
+                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                           {index + 1}
+                         </td>
+                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                           {teacher.name}
+                         </td>
+                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                           {format(parseISO(teacher.date), 'd MMMM yyyy', { locale: id })}
+                         </td>
+                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                           {teacher.time}
+                         </td>
+                       </tr>
+                     ))
+                   ) : (
+                     <tr>
+                       <td colSpan={4} className="px-6 py-4 text-center text-gray-500">
+                         Tidak ada data guru dengan status IZIN
+                       </td>
+                     </tr>
+                   )}
+                 </tbody>
+               </table>
+             </div>
+           </div>
+
+           {/* ALPHA Table */}
+           <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+             <div className="p-6 border-b border-gray-100">
+               <h2 className="text-lg font-semibold flex items-center text-red-700">
+                 <X className="mr-2 h-5 w-5" />
+                 Daftar Guru dengan Status ALPHA
+               </h2>
+             </div>
+
+             <div className="overflow-x-auto">
+               <table className="w-full">
+                 <thead>
+                   <tr className="bg-red-50 text-left">
+                     <th className="px-6 py-3 text-xs font-medium text-red-700 uppercase tracking-wider">No</th>
+                     <th className="px-6 py-3 text-xs font-medium text-red-700 uppercase tracking-wider">Nama</th>
+                     <th className="px-6 py-3 text-xs font-medium text-red-700 uppercase tracking-wider">Tanggal</th>
+                     <th className="px-6 py-3 text-xs font-medium text-red-700 uppercase tracking-wider">Status</th>
+                   </tr>
+                 </thead>
+                 <tbody className="divide-y divide-gray-200">
+                   {absentTeachers.length > 0 ? (
+                     absentTeachers.map((teacher, index) => (
+                       <tr key={index} className="hover:bg-gray-50">
+                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                           {index + 1}
+                         </td>
+                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                           {teacher.name}
+                         </td>
+                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                           {format(parseISO(teacher.date), 'd MMMM yyyy', { locale: id })}
+                         </td>
+                         <td className="px-6 py-4 whitespace-nowrap">
+                           <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">
+                             {teacher.status}
+                           </span>
+                         </td>
+                       </tr>
+                     ))
+                   ) : (
+                     <tr>
+                       <td colSpan={4} className="px-6 py-4 text-center text-gray-500">
+                         Tidak ada data guru dengan status ALPHA
+                       </td>
+                     </tr>
+                   )}
+                 </tbody>
+               </table>
+             </div>
+           </div>
+         </div>
+
+         {/* Download Buttons */}
+         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+           <button
+             onClick={generatePDF}
+             disabled={isDownloading}
+             className="flex items-center justify-center gap-3 bg-red-600 text-white p-4 rounded-xl hover:bg-red-700 transition-colors"
+           >
+             {isDownloading ? (
+               <Loader2 className="h-6 w-6 animate-spin" />
+             ) : (
+               <FileText className="h-6 w-6" />
+             )}
+             <span className="font-medium">Download Laporan PDF</span>
+           </button>
+
+           <button
+             onClick={generateExcel}
+             disabled={isDownloading}
+             className="flex items-center justify-center gap-3 bg-green-600 text-white p-4 rounded-xl hover:bg-green-700 transition-colors"
+           >
+             {isDownloading ? (
+               <Loader2 className="h-6 w-6 animate-spin" />
+             ) : (
+               <FileSpreadsheet className="h-6 w-6" />
+             )}
+             <span className="font-medium">Download Laporan Excel</span>
+           </button>
+         </div>
+       </>
+     )}
    </div>
  );
 }
